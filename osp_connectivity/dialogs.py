@@ -889,7 +889,10 @@ class PanelViewDialog(QDialog):
         count = inventory.get("count") or 0
         used = sum(1 for port in inventory.get("ports") or [] if port.get("occupied"))
         layout.addWidget(QLabel(f"{panel_id}\nIDF: {idf}\n{used} of {count} ports occupied"))
-        legend = QLabel(inventory.get("legend") or "Blue ports are occupied. Click one to see the device and cable.")
+        legend = QLabel(
+            inventory.get("legend")
+            or "Blue ports have a cable, device, or switch patch. Click one to see them."
+        )
         legend.setWordWrap(True)
         layout.addWidget(legend)
 

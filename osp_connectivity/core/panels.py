@@ -36,21 +36,37 @@ def panels_for(idf_ids: list[str], features: list[dict], index: dict) -> list[st
     return found
 
 
+def panel_is_simplex(panel: dict) -> bool:
+    """Fiber panels pair ports 1-2, 3-4, and so on, unless this attribute says simplex."""
+    values = panel.get("values") or {}
+    for key in ("topology", "connector_type", "port_type", "fiber_connector", "port_topology", "duplex", "fdp"):
+        if (text_of(values.get(key)) or "").casefold() == "simplex":
+            return True
+    return False
+
+
 def panel_ports(panel: dict, features: list[dict], tables: dict | None = None) -> dict:
-    """Every port on a panel, and the device and cable that occupy each one."""
+    """Every port on a panel, with the rear cable and any front switch patch on it.
+
+    A device or cable on a port does not count as a switch patch. ``patched`` is
+    set only when a patching record covers that port.
+    """
     tables = tables or {}
     panel_id = feature_id(panel) or ""
     values = panel.get("values") or {}
     stated = parse_count(values.get("port_count")) or 0
     by_port: dict[int, dict] = {}
 
-    def claim(port_value, device=None, cable=None, switch=None) -> None:
-        for number in parse_range(port_value):
-            slot = by_port.setdefault(number, {"devices": [], "cables": [], "switches": []})
+    def claim(port_value, device=None, cable=None, switch=None, span=None) -> None:
+        numbers = list(port_value) if isinstance(port_value, (list, tuple)) else parse_range(port_value)
+        for number in numbers:
+            slot = by_port.setdefault(number, {"devices": [], "cables": [], "switches": [], "spans": {}})
             if device is not None and not any(_same_feature(device, item) for item in slot["devices"]):
                 slot["devices"].append(device)
             if cable is not None and not any(_same_feature(cable, item) for item in slot["cables"]):
                 slot["cables"].append(cable)
+                if span:
+                    slot["spans"][feature_id(cable) or ""] = span
             if switch and switch not in slot["switches"]:
                 slot["switches"].append(switch)
 
@@ -58,12 +74,8 @@ def panel_ports(panel: dict, features: list[dict], tables: dict | None = None) -
         feature_values = feature.get("values") or {}
         if feature.get("role") in DEVICE_ROLES and _same_text(feature_values.get("panel"), panel_id):
             claim(feature_values.get("port"), device=feature)
-        if feature.get("role") != "cable":
-            continue
-        if _same_text(feature_values.get("a_panel"), panel_id):
-            claim(feature_values.get("a_port"), cable=feature, device=_device_on_cable(feature, features))
-        if _same_text(feature_values.get("z_panel"), panel_id):
-            claim(feature_values.get("z_port"), cable=feature, device=_device_on_cable(feature, features))
+    for cable, numbers in _rear_assignments(panel_id, features):
+        claim(numbers, cable=cable, device=_device_on_cable(cable, features), span=_format_ports(numbers))
     for row in tables.get("terminations") or []:
         if _same_text(row.get("pp_id") or row.get("fdp_id") or row.get("panel_id"), panel_id):
             claim(row.get("panel_port") or row.get("panel_position") or row.get("port"))
@@ -83,16 +95,19 @@ def panel_ports(panel: dict, features: list[dict], tables: dict | None = None) -
     total = max(stated, highest)
     ports = []
     for number in range(1, total + 1):
-        slot = by_port.get(number) or {"devices": [], "cables": [], "switches": []}
+        slot = by_port.get(number) or {"devices": [], "cables": [], "switches": [], "spans": {}}
         device = slot["devices"][0] if slot["devices"] else None
         cable = slot["cables"][0] if slot["cables"] else None
         switch = slot["switches"][0] if slot.get("switches") else ("", "")
+        cable_id = feature_id(cable) if cable else ""
         ports.append(
             {
                 "number": number,
                 "occupied": bool(slot["devices"] or slot["cables"] or slot.get("switches")),
+                "patched": bool(slot.get("switches")),
                 "device_id": feature_id(device) if device else "",
-                "cable_id": feature_id(cable) if cable else "",
+                "cable_id": cable_id,
+                "cable_span": (slot.get("spans") or {}).get(cable_id, ""),
                 "switch_id": switch[0],
                 "switch_port_id": switch[1],
                 "device": device,
@@ -175,6 +190,94 @@ def cable_idf_edits(cable: dict, idf_id: str, panel_id: str, point: tuple | None
     if panel_id and is_blank(values.get(panel_field)):
         edits.append(_edit(cable, panel_field, panel_id))
     return edits, warnings
+
+
+def _rear_assignments(panel_id: str, features: list[dict]) -> list[tuple[dict, list[int]]]:
+    """Ports each cable lands on at the rear of this panel.
+
+    Copper uses the port written on the cable. A fiber cable with no port
+    takes the next free run of ports equal to its strand count, so two
+    72-strand cables land on 1-72 and 73-144.
+    """
+    explicit = []
+    pending = []
+    for feature in features:
+        if feature.get("role") != "cable":
+            continue
+        values = feature.get("values") or {}
+        port_value = _landing_port(values, panel_id)
+        if port_value is None:
+            continue
+        numbers = parse_range(port_value)
+        if numbers:
+            explicit.append((feature, numbers))
+            continue
+        count = parse_count(values.get("strand_count")) or 0
+        if count and _is_fiber(values):
+            pending.append((feature, count))
+    used = {number for _feature, numbers in explicit for number in numbers}
+    pending.sort(key=lambda item: (feature_id(item[0]) or "").casefold())
+    assigned = list(explicit)
+    for feature, count in pending:
+        block = _free_block(count, used)
+        assigned.append((feature, block))
+        used.update(block)
+    return assigned
+
+
+def _landing_port(values: dict, panel_id: str):
+    """The port text on the cable end that names this panel.
+
+    Returns None when this cable does not land here. A blank port is returned
+    as '' so a fiber cable can still take a run of ports from its strand count.
+    """
+    found = None
+    landed = False
+    for panel_key, port_key in (("a_panel", "a_port"), ("z_panel", "z_port")):
+        if not _same_text(values.get(panel_key), panel_id):
+            continue
+        landed = True
+        if parse_range(values.get(port_key)):
+            return values.get(port_key)
+        found = values.get(port_key)
+    if not landed:
+        return None
+    return "" if found is None else found
+
+
+def _free_block(count: int, used: set[int]) -> list[int]:
+    cursor = 1
+    while cursor < 100000:
+        block = list(range(cursor, cursor + count))
+        if not any(number in used for number in block):
+            return block
+        cursor += 1
+    return []
+
+
+def _is_fiber(values: dict) -> bool:
+    media = (text_of(values.get("media")) or "").casefold()
+    if media.startswith("fiber"):
+        return True
+    if media.startswith("copper"):
+        return False
+    return bool(parse_count(values.get("strand_count")))
+
+
+def _format_ports(numbers: list[int]) -> str:
+    ordered = sorted(set(numbers))
+    if not ordered:
+        return ""
+    ranges = []
+    start = previous = ordered[0]
+    for number in ordered[1:]:
+        if number == previous + 1:
+            previous = number
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = number
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ", ".join(ranges)
 
 
 def _same_text(left, right) -> bool:

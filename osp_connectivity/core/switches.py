@@ -6,7 +6,7 @@ import re
 
 from .catalog import feature_id
 from .fields import next_id, parse_count, text_of
-from .panels import panel_ports
+from .panels import panel_is_simplex, panel_ports
 
 
 def suggest_switch_id(existing, idf_id: str) -> str:
@@ -101,13 +101,17 @@ def panels_for_idf(idf_id: str, features: list[dict], media: str) -> list[dict]:
 
 
 def open_panel_ports(panel: dict, features: list[dict], tables: dict, media: str, single_fiber: bool) -> list[str]:
-    """Free panel ports. Fiber is offered as odd-even pairs unless a single fiber is requested."""
+    """Panel ports with no patching record.
+
+    A device or rear cable on a port leaves it available. Fiber is offered as
+    odd-even pairs unless the panel is simplex or a single fiber is requested.
+    """
     inventory = panel_ports(panel, features, tables)
-    taken = {port["number"] for port in inventory["ports"] if port["occupied"]}
+    taken = {port["number"] for port in inventory["ports"] if port.get("patched")}
     total = inventory["count"]
     if not total:
         return []
-    if media != "fiber" or single_fiber:
+    if media != "fiber" or single_fiber or panel_is_simplex(panel):
         return [str(number) for number in range(1, total + 1) if number not in taken]
     choices = []
     number = 1

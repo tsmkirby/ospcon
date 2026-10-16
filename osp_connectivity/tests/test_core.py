@@ -591,6 +591,98 @@ class AssociateAndTraceTests(unittest.TestCase):
         self.assertEqual(viewed["ports"][0]["panel_id"], "FD-1")
         self.assertEqual(viewed["ports"][1]["occupied"], False)
 
+    def test_rear_cables_do_not_block_a_front_patch(self):
+        panel = feature(
+            "patch_panel",
+            1,
+            "PP-1",
+            {"idf_ref": "IDF-1", "port_count": 4},
+            geometry="Point",
+            coords=[(0, 0)],
+        )
+        cable = feature(
+            "cable",
+            2,
+            "CB-1",
+            {"media": "copper", "z_panel": "PP-1", "z_port": "1", "a_end": "AP-1"},
+            coords=[(0, 0), (1, 0)],
+        )
+        device = feature(
+            "ap",
+            3,
+            "AP-1",
+            {"panel": "PP-1", "port": "1", "cable_ref": "CB-1"},
+            geometry="Point",
+            coords=[(0, 0)],
+        )
+        features = [panel, cable, device]
+        self.assertEqual(open_panel_ports(panel, features, {}, "copper", False), ["1", "2", "3", "4"])
+        tables = {"patches": [{"panel_id": "PP-1", "panel_port": "1", "sw_id": "SW-1", "switch_port_id": "gi1/0/1"}]}
+        self.assertEqual(open_panel_ports(panel, features, tables, "copper", False), ["2", "3", "4"])
+        viewed = panel_ports(panel, features, tables)
+        self.assertEqual(viewed["ports"][0]["cable_id"], "CB-1")
+        self.assertEqual(viewed["ports"][0]["device_id"], "AP-1")
+        self.assertTrue(viewed["ports"][0]["patched"])
+        self.assertEqual(viewed["ports"][0]["switch_id"], "SW-1")
+
+    def test_fiber_rear_cables_stack_by_strand_count_and_duplex_pairs(self):
+        panel = feature(
+            "fdp",
+            1,
+            "FD-1",
+            {"idf_ref": "IDF-1", "port_count": 144},
+            geometry="Point",
+            coords=[(0, 0)],
+        )
+        first = feature(
+            "cable",
+            2,
+            "FOC-1",
+            {"media": "fiber", "strand_count": 72, "z_panel": "FD-1"},
+            coords=[(0, 0), (1, 0)],
+        )
+        second = feature(
+            "cable",
+            3,
+            "FOC-2",
+            {"media": "fiber", "strand_count": 72, "z_panel": "FD-1"},
+            coords=[(0, 0), (2, 0)],
+        )
+        viewed = panel_ports(panel, [panel, first, second], {})
+        self.assertEqual(viewed["ports"][0]["cable_id"], "FOC-1")
+        self.assertEqual(viewed["ports"][0]["cable_span"], "1-72")
+        self.assertEqual(viewed["ports"][71]["cable_id"], "FOC-1")
+        self.assertEqual(viewed["ports"][72]["cable_id"], "FOC-2")
+        self.assertEqual(viewed["ports"][143]["cable_span"], "73-144")
+        self.assertFalse(viewed["ports"][0]["patched"])
+        self.assertEqual(open_panel_ports(panel, [panel, first, second], {}, "fiber", False)[:2], ["1-2", "3-4"])
+        placed = feature(
+            "cable",
+            4,
+            "FOC-9",
+            {"media": "fiber", "strand_count": 72, "z_panel": "FD-1", "z_port": "73-144"},
+            coords=[(0, 0), (3, 0)],
+        )
+        open_first = feature(
+            "cable",
+            5,
+            "FOC-8",
+            {"media": "fiber", "strand_count": 72, "z_panel": "FD-1"},
+            coords=[(0, 0), (4, 0)],
+        )
+        stacked = panel_ports(panel, [panel, placed, open_first], {})
+        self.assertEqual(stacked["ports"][0]["cable_id"], "FOC-8")
+        self.assertEqual(stacked["ports"][72]["cable_id"], "FOC-9")
+        simplex = feature(
+            "fdp",
+            6,
+            "FD-2",
+            {"idf_ref": "IDF-1", "port_count": 4, "topology": "simplex"},
+            geometry="Point",
+            coords=[(0, 0)],
+        )
+        self.assertEqual(open_panel_ports(simplex, [simplex], {}, "fiber", False), ["1", "2", "3", "4"])
+
     def test_click_at_an_idf_labels_the_near_cable_end(self):
         cable = feature(
             "cable",

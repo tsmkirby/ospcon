@@ -1458,7 +1458,11 @@ class OspConnectivityPlugin:
             if port.get("device_id"):
                 lines.append(f"Device: {port['device_id']}")
             if port.get("cable_id"):
-                lines.append(f"Cable: {port['cable_id']}")
+                span = port.get("cable_span") or ""
+                if span and span != str(port["number"]):
+                    lines.append(f"Cable: {port['cable_id']} (ports {span})")
+                else:
+                    lines.append(f"Cable: {port['cable_id']}")
             if port.get("switch_id"):
                 lines.append(f"Switch: {port['switch_id']}")
             if port.get("switch_port_id"):

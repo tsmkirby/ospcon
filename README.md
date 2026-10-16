@@ -43,7 +43,7 @@ The **OSP Connectivity** toolbar has these actions. Results open in the **OSP Re
 | Trace selection | Follows the selected device, cable, or IDF and highlights the path. |
 | Add fiber enclosure | Click a fiber cable. The cable is split and you choose which strands are spliced. |
 | Add patch panel | Click an IDF. A copper cable gets a copper panel and a fiber cable gets a fiber panel, with the port and ends recorded in the dialog. A new panel asks for its port count and is stored on that IDF. |
-| View patch panel | Click an IDF, then choose one of its patch panels. Every port is shown, and an occupied port opens the device and cable on it. |
+| View patch panel | Click an IDF, then choose one of its patch panels. Every port is shown. Click a port to see the rear cable and any switch patch on it. |
 | View switch | Click an IDF, then choose one of its switches. Patched ports show the panel and port. |
 | Add switch | Click an IDF. Creates the switch, with ports such as `gi1/0/1`, on that IDF. |
 | Patching | Cross-connect an open patch-panel port to an open switch port at the same IDF. |
@@ -145,7 +145,9 @@ Choose **Add patch panel**, then click an IDF. Enter a panel id that is not alre
 
 ### View patch panel
 
-Choose **View patch panel** and click an IDF. The dialog asks which patch panel to view and lists each one by its id, with the panel name beside it when the panel has a name. The next dialog draws every port. Occupied ports are blue and open ports are light. Click an occupied port to see the device and cable on that port, with the trace for that circuit.
+Choose **View patch panel** and click an IDF. The dialog asks which patch panel to view and lists each one by its id, with the panel name beside it when the panel has a name. The next dialog draws every port. Ports with a cable, device, or switch patch are blue. Click one to see the rear cable and the switch patch when that port has one, with the trace for the cable.
+
+A copper panel has one rear cable per port. A fiber panel can have several rear cables. Each fiber cable takes a run of ports equal to its strand count when the cable does not already name ports: a 72-strand cable on ports 1-72, and the next 72-strand cable on ports 73-144. Fiber ports are paired 1-2, 3-4, and so on, unless the panel's topology attribute is `simplex`.
 
 ### View switch
 
@@ -161,7 +163,7 @@ If the project has no switch table yet, the plugin adds OSP Switches, OSP Switch
 
 ### Patching
 
-Choose **Patching**. Pick the IDF, then copper or fiber. Copper uses the patch panels on that IDF. Fiber uses the fiber panels. The port list shows only ports that are not already patched or cabled. Fiber is offered as odd-even pairs (`1-2`, `3-4`) unless you check **Single fiber circuit**. Then pick the switch on that IDF and one of its free ports, such as `gi1/0/3`. Click **Add patch**, then **Save**.
+Choose **Patching**. Pick the IDF, then copper or fiber. Copper uses the patch panels on that IDF. Fiber uses the fiber panels. The port list shows ports that do not already have a patching record. A device or rear cable on a port does not take it off this list, so port 1 can hold a cable and a switch patch at the same time. A port that already has a patch stays off the list. Fiber is offered as odd-even pairs (`1-2`, `3-4`) unless the panel topology is `simplex` or you check **Single fiber circuit**. Then pick the switch on that IDF and one of its free ports, such as `gi1/0/3`. Click **Add patch**, then **Save**.
 
 The patches already stored for that IDF are listed in the same dialog.
 

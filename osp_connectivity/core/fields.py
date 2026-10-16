@@ -149,6 +149,7 @@ _VALUE_CANDIDATES = {
     "venue": ["venue_code"],
     "idf_ref": ["mdf_idf_id", "idf_id", "idf_ref"],
     "port_count": ["port_count", "position_count", "sw_port_count"],
+    "topology": ["topology", "connector_type", "port_type", "fiber_connector", "port_topology", "duplex", "fdp"],
 }
 
 
