@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import traceback
 
 from qgis.PyQt.QtCore import Qt
@@ -48,12 +47,13 @@ from .bridge import (
 )
 from .core.associate import assignment_edits, occupied_ports, propose
 from .core.catalog import feature_id
+from .core.export import export_reports
 from .core.fields import enclosure_id, media_of, next_id, parse_count
 from .core.geometry import distance, split_linestring
 from .core.link import RowInsert, plan_links
 from .core.strands import build_splice_rows
 from .core.trace import format_report, trace_selection
-from .dialogs import AssociateDialog, SpliceDialog
+from .dialogs import AssociateDialog, ExportDialog, SpliceDialog
 
 
 class EnclosureMapTool(QgsMapTool):
@@ -76,6 +76,7 @@ class OspConnectivityPlugin:
         self.report = None
         self.bands = []
         self.tool = None
+        self._reports = []
 
     def initGui(self):
         self.toolbar = self.iface.addToolBar("OSP Connectivity")
@@ -90,7 +91,7 @@ class OspConnectivityPlugin:
         self.report.setReadOnly(True)
         self.report.setPlaceholderText("Association and trace reports appear here.")
         copy_button = QPushButton("Copy")
-        export_button = QPushButton("Export CSV")
+        export_button = QPushButton("Export")
         clear_button = QPushButton("Clear highlight")
         copy_button.clicked.connect(self._copy)
         export_button.clicked.connect(self._export)
@@ -235,6 +236,7 @@ class OspConnectivityPlugin:
         selected = self._selected(layers, features)
         tables = read_tables(layers, infos)
         result = trace_selection(selected, features, tables)
+        self._reports = list(result.get("reports") or [])
         self._show(format_report(result))
         self._highlight(layers, result.get("highlights") or {})
 
@@ -510,14 +512,42 @@ class OspConnectivityPlugin:
         QApplication.clipboard().setText(self.report.toPlainText())
 
     def _export(self) -> None:
-        path, _filter = QFileDialog.getSaveFileName(self.iface.mainWindow(), "Export OSP report", "", "CSV (*.csv)")
+        if not self._reports:
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "Export report",
+                "Trace a selection first. The spreadsheet is built from that report.",
+            )
+            return
+        dialog = ExportDialog(self._reports, self.iface.mainWindow())
+        if dialog.exec_() != dialog.Accepted:
+            return
+        choice = dialog.choices()
+        if choice["mode"] == "append":
+            path, _filter = QFileDialog.getOpenFileName(
+                self.iface.mainWindow(),
+                "Add to spreadsheet",
+                "",
+                "Spreadsheets (*.csv *.xlsx)",
+            )
+            append = True
+        else:
+            suffix = "xlsx" if choice["format"] == "xlsx" else "csv"
+            label = "Excel (*.xlsx)" if suffix == "xlsx" else "CSV (*.csv)"
+            path, _filter = QFileDialog.getSaveFileName(
+                self.iface.mainWindow(),
+                "Export OSP report",
+                "",
+                label,
+            )
+            if path and not path.lower().endswith("." + suffix):
+                path = f"{path}.{suffix}"
+            append = False
         if not path:
             return
-        with open(path, "w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["line"])
-            for line in self.report.toPlainText().splitlines():
-                writer.writerow([line])
+        written = export_reports(path, choice["reports"], choice["fields"], append)
+        verb = "Added" if append else "Wrote"
+        self.iface.messageBar().pushInfo("OSP Connectivity", f"{verb} {written} row(s) in {path}.")
 
     def _run(self, title, function) -> None:
         try:

@@ -8,10 +8,12 @@ from qgis.PyQt.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -22,6 +24,7 @@ from qgis.PyQt.QtWidgets import (
 
 from .core.associate import port_in_use
 from .core.catalog import feature_id
+from .core.export import COLUMNS, item_label
 from .core.fields import parse_count, parse_range
 from .core.strands import build_splice_rows, compress_splices, validate_edits
 
@@ -260,3 +263,88 @@ class SpliceDialog(QDialog):
             "fusions": self._fusions(),
             "opens": self._open_ranges(),
         }
+
+
+class ExportDialog(QDialog):
+    """Choose which traced circuits and columns go into a CSV or Excel file."""
+
+    def __init__(self, reports, parent=None):
+        super().__init__(parent)
+        self.reports = list(reports)
+        self.setWindowTitle("Export report")
+        self.resize(520, 560)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Check the circuits and columns to write. Column names stay the same every time, so later exports can be added to this file."))
+
+        lists = QHBoxLayout()
+        self.items = QListWidget()
+        for index, report in enumerate(self.reports):
+            item = QListWidgetItem(item_label(report, index))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setData(Qt.UserRole, index)
+            self.items.addItem(item)
+        self.fields = QListWidget()
+        for name in COLUMNS:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setData(Qt.UserRole, name)
+            self.fields.addItem(item)
+        lists.addWidget(self._boxed("Items", self.items))
+        lists.addWidget(self._boxed("Fields", self.fields))
+        layout.addLayout(lists)
+
+        form = QFormLayout()
+        self.mode = QComboBox()
+        self.mode.addItem("Create a new file", "new")
+        self.mode.addItem("Add rows to an existing file", "append")
+        self.format = QComboBox()
+        self.format.addItem("Excel (.xlsx)", "xlsx")
+        self.format.addItem("CSV (.csv)", "csv")
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        form.addRow("File", self.mode)
+        form.addRow("Format", self.format)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def choices(self) -> dict:
+        reports = []
+        for index in range(self.items.count()):
+            item = self.items.item(index)
+            if item.checkState() == Qt.Checked:
+                reports.append(self.reports[item.data(Qt.UserRole)])
+        fields = []
+        for index in range(self.fields.count()):
+            item = self.fields.item(index)
+            if item.checkState() == Qt.Checked:
+                fields.append(item.data(Qt.UserRole))
+        return {
+            "reports": reports,
+            "fields": fields,
+            "mode": self.mode.currentData(),
+            "format": self.format.currentData(),
+        }
+
+    def _boxed(self, title, widget):
+        box = QGroupBox(title)
+        inner = QVBoxLayout(box)
+        inner.addWidget(widget)
+        return box
+
+    def _mode_changed(self) -> None:
+        self.format.setEnabled(self.mode.currentData() == "new")
+
+    def _accept(self) -> None:
+        choice = self.choices()
+        if not choice["reports"]:
+            QMessageBox.warning(self, "Export report", "Select at least one item.")
+            return
+        if not choice["fields"]:
+            QMessageBox.warning(self, "Export report", "Select at least one field.")
+            return
+        self.accept()
