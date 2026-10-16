@@ -23,6 +23,7 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsFeatureRequest,
     QgsGeometry,
+    QgsPointXY,
     QgsProject,
     QgsSettings,
     QgsUnitTypes,
@@ -35,9 +36,13 @@ from qgis.gui import QgsMapTool, QgsRubberBand
 from .bridge import (
     EditSession,
     add_enclosure_point,
+    add_mapped_feature,
+    add_panel_feature,
     apply_edits,
     apply_inserts,
     apply_plain_edits,
+    ensure_id_field,
+    ensure_panel_layer,
     ensure_project,
     existing_keys,
     read_features,
@@ -48,12 +53,75 @@ from .bridge import (
 from .core.associate import assignment_edits, occupied_ports, propose
 from .core.catalog import feature_id
 from .core.export import export_reports
-from .core.fields import enclosure_id, media_of, next_id, parse_count
+from .core.fields import enclosure_id_from_prefix, media_of, next_id, parse_count, suggest_enclosure_prefix, text_of
 from .core.geometry import distance, split_linestring
 from .core.link import RowInsert, plan_links
+from .core.panels import panel_feature_ids, suggest_panel_id
+from .core.place import (
+    cable_layer_choices,
+    device_layer_choices,
+    features_along_line,
+    idfs_serving_cable,
+    name_taken,
+    nearest_cable,
+    nearer_end_name,
+    panel_click_edits,
+    panel_media_groups,
+    panels_for_idfs,
+    placement_edits,
+    taken_cable_ids,
+    taken_device_names,
+)
 from .core.strands import build_splice_rows
 from .core.trace import format_report, trace_selection
-from .dialogs import AssociateDialog, ExportDialog, SpliceDialog
+from .dialogs import AssociateDialog, ExportDialog, PatchPanelDialog, PlacementDialog, SpliceDialog
+
+
+class SketchTool(QgsMapTool):
+    """Left-click adds a vertex. Right-click or Enter finishes the line."""
+
+    def __init__(self, canvas, finished):
+        super().__init__(canvas)
+        self.finished = finished
+        self.points = []
+        self.band = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
+        self.band.setColor(QColor(230, 120, 20))
+        self.band.setWidth(2)
+
+    def canvasReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.points.append(self.toMapCoordinates(event.pos()))
+            self._redraw()
+        elif event.button() == Qt.RightButton:
+            self._finish()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self._finish()
+        elif event.key() == Qt.Key_Escape:
+            self._clear()
+        else:
+            super().keyPressEvent(event)
+
+    def deactivate(self):
+        self._clear()
+        super().deactivate()
+
+    def _finish(self):
+        if len(self.points) < 2:
+            return
+        points = list(self.points)
+        self._clear()
+        self.finished(points)
+
+    def _redraw(self):
+        self.band.reset(QgsWkbTypes.LineGeometry)
+        for point in self.points:
+            self.band.addPoint(point)
+
+    def _clear(self):
+        self.points = []
+        self.band.reset(QgsWkbTypes.LineGeometry)
 
 
 class EnclosureMapTool(QgsMapTool):
@@ -85,6 +153,9 @@ class OspConnectivityPlugin:
         self._action("Associate selection", self.associate_selection)
         self._action("Trace selection", self.trace_selection)
         self._action("Add fiber enclosure", self.start_enclosure)
+        self._action("Add patch panel", self.start_panel)
+        self._action("Add device", self.start_device)
+        self._action("Add cable", self.start_cable)
         self._action("Set snap tolerance", self.set_tolerance)
 
         self.report = QPlainTextEdit()
@@ -139,6 +210,24 @@ class OspConnectivityPlugin:
         self.tool = EnclosureMapTool(canvas, lambda point: self._run("Add fiber enclosure", lambda: self._enclose(point)))
         canvas.setMapTool(self.tool)
         self.iface.messageBar().pushInfo("OSP Connectivity", "Click a fiber cable to add an enclosure.")
+
+    def start_panel(self):
+        canvas = self.iface.mapCanvas()
+        self.tool = EnclosureMapTool(canvas, lambda point: self._run("Add patch panel", lambda: self._add_panel(point)))
+        canvas.setMapTool(self.tool)
+        self.iface.messageBar().pushInfo("OSP Connectivity", "Click an IDF to add a patch panel.")
+
+    def start_device(self):
+        canvas = self.iface.mapCanvas()
+        self.tool = EnclosureMapTool(canvas, lambda point: self._run("Add device", lambda: self._add_device(point)))
+        canvas.setMapTool(self.tool)
+        self.iface.messageBar().pushInfo("OSP Connectivity", "Click the map to add a device.")
+
+    def start_cable(self):
+        canvas = self.iface.mapCanvas()
+        self.tool = SketchTool(canvas, lambda points: self._run("Add cable", lambda: self._add_cable(points)))
+        canvas.setMapTool(self.tool)
+        self.iface.messageBar().pushInfo("OSP Connectivity", "Left-click the cable path. Right-click or Enter to finish.")
 
     def set_tolerance(self):
         project = QgsProject.instance()
@@ -206,18 +295,25 @@ class OspConnectivityPlugin:
             return
         result = assignment_edits(proposal, dialog.choices())
         session = EditSession()
-        skipped = apply_plain_edits(session, layers, infos, result["edits"])
-        inserts = []
-        if result.get("circuit"):
-            inserts.append(RowInsert("circuit", result["circuit"], "circuit"))
-        for route in result.get("routes") or []:
-            inserts.append(RowInsert("cable_route", route, "route"))
-        if result.get("mount"):
-            inserts.append(RowInsert("mounted_device", result["mount"], "mount"))
-        self._termination_inserts(inserts, proposal, result, store)
-        written = apply_inserts(session, store, inserts)
-        errors = session.commit()
+        try:
+            skipped = apply_plain_edits(session, layers, infos, result["edits"])
+            inserts = []
+            if result.get("circuit"):
+                inserts.append(RowInsert("circuit", result["circuit"], "circuit"))
+            for route in result.get("routes") or []:
+                inserts.append(RowInsert("cable_route", route, "route"))
+            if result.get("mount"):
+                inserts.append(RowInsert("mounted_device", result["mount"], "mount"))
+            self._termination_inserts(inserts, proposal, result, store)
+            written = apply_inserts(session, store, inserts)
+            panel_note = self._create_panel(session, project, layers, infos, result.get("new_panel"))
+            errors = session.commit()
+        except Exception:
+            session.rollback()
+            raise
         lines = list(result.get("warnings") or [])
+        if panel_note:
+            lines.append(panel_note)
         lines.append(f"Field updates prepared: {len(result['edits'])}")
         lines.append(f"Rows added: {written}")
         lines.append("Save layer edits to keep this. Undo reverses it until then.")
@@ -239,6 +335,174 @@ class OspConnectivityPlugin:
         self._reports = list(result.get("reports") or [])
         self._show(format_report(result))
         self._highlight(layers, result.get("highlights") or {})
+
+    def _create_panel(self, session, project, layers, infos, spec) -> str:
+        if not spec:
+            return ""
+        if spec.get("x") is None or spec.get("y") is None:
+            return f"{spec['panel_id']} was not created because {spec['idf_id']} has no location."
+        _layers, infos, layer = ensure_panel_layer(project, layers, infos, spec.get("media") == "fiber")
+        info = next(item for item in infos if item.layer_id == layer.id())
+        add_panel_feature(
+            session,
+            project,
+            layer,
+            info,
+            (spec["x"], spec["y"]),
+            spec["panel_id"],
+            spec["idf_id"],
+            spec.get("media") or "copper",
+        )
+        return f"Patch panel {spec['panel_id']} was added for {spec['idf_id']}."
+
+    def _add_panel(self, canvas_point):
+        project, point_xy, layers, infos, features = self._click_context(canvas_point)
+        tolerance = self._tolerance(project)
+        idf = self._idf_at(project, layers, features, point_xy, tolerance)
+        if idf is None:
+            raise RuntimeError("Click an IDF to add a patch panel.")
+        groups = panel_media_groups(point_xy, features, tolerance)
+        for group in groups:
+            if len(group["devices"]) > 1:
+                kind = "fiber" if group["media"] == "fiber" else "copper"
+                raise RuntimeError(
+                    f"More than one device is on the {kind} cables at this point. Use Associate selection."
+                )
+        existing = panel_feature_ids(features)
+        template_style = not any(
+            "osp_links.gpkg" in (info.source or "")
+            for info in infos
+            if info.role in ("patch_panel", "fdp", "splice_enc")
+        )
+        idf_id = feature_id(idf) or ""
+        suggestions = {
+            "copper": suggest_panel_id(existing, idf_id, False, template_style),
+            "fiber": suggest_panel_id(existing, idf_id, True, template_style),
+        }
+        dialog_groups = []
+        for group in groups:
+            dialog_groups.append(
+                {
+                    "media": group["media"],
+                    "cable_ids": [feature_id(cable) or "" for cable in group["cables"]],
+                    "device_id": feature_id(group["device"]) if group.get("device") else "",
+                    "idf_end": group["idf_end"],
+                }
+            )
+        dialog = PatchPanelDialog(
+            idf_id,
+            dialog_groups,
+            suggestions,
+            existing,
+            occupied_ports(features, read_tables(layers, infos).get("terminations") or []),
+            self.iface.mainWindow(),
+        )
+        if dialog.exec_() != dialog.Accepted:
+            return
+        choices = dialog.choices()
+        for choice in choices:
+            if name_taken(choice["panel_id"], existing):
+                raise RuntimeError(f"{choice['panel_id']} already exists.")
+        layers, infos, store = ensure_project(project, layers, infos)
+        for choice in choices:
+            layers, infos, _panel_layer = ensure_panel_layer(
+                project, layers, infos, choice.get("media") == "fiber"
+            )
+        features = read_features(project, layers, infos)
+        idf = self._same_feature(features, idf)
+        session = EditSession()
+        notes = []
+        warnings = []
+        try:
+            edits = []
+            known_panels = panel_feature_ids(features)
+            for choice, group in zip(choices, groups or [None]):
+                if not choice.get("associate") or group is None:
+                    spec = {
+                        "panel_id": choice["panel_id"],
+                        "idf_id": feature_id(idf),
+                        "media": choice.get("media") or "copper",
+                        "x": point_xy[0],
+                        "y": point_xy[1],
+                    }
+                    notes.append(self._create_panel(session, project, layers, infos, spec))
+                    continue
+                cables = [item for item in (self._same_feature(features, cable) for cable in group["cables"]) if item]
+                cable = self._same_feature(features, group["cable"])
+                device = self._same_feature(features, group.get("device")) if group.get("device") else None
+                choice["cable_layer_id"] = (cable or {}).get("layer_id")
+                if device:
+                    choice["device_layer_id"] = device.get("layer_id")
+                plan = panel_click_edits(
+                    choice,
+                    cables,
+                    cable,
+                    device,
+                    idf,
+                    point_xy,
+                    known_panels,
+                    choice.get("media") or group["media"],
+                )
+                notes.append(self._create_panel(session, project, layers, infos, plan.get("new_panel")))
+                edits.extend(plan["edits"])
+                warnings.extend(plan["warnings"])
+                self._store_circuit(session, store, plan.get("circuit"))
+                if plan.get("new_panel"):
+                    known_panels.append(plan["new_panel"]["panel_id"])
+            skipped = apply_plain_edits(session, layers, infos, edits)
+            errors = session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        if errors:
+            raise RuntimeError("\n".join(errors))
+        lines = [note for note in notes if note]
+        associated = [feature_id(cable) or "?" for group in groups for cable in group["cables"]]
+        if associated:
+            lines.append("Cables associated: " + ", ".join(associated))
+        else:
+            lines.append("No cable crossed this point.")
+        lines.extend(f"Warning: {warning}" for warning in warnings)
+        for note in skipped:
+            lines.append(f"Skipped field: {note}")
+        lines.append("Save layer edits to keep this. Undo reverses it until then.")
+        self._show("\n".join(lines))
+        self.iface.mapCanvas().refresh()
+
+    def _idf_at(self, project, layers, features, point_xy, tolerance):
+        point = QgsGeometry.fromPointXY(QgsPointXY(point_xy[0], point_xy[1]))
+        ranked = []
+        for feature in features:
+            if feature.get("role") != "idf":
+                continue
+            layer = layers.get(feature["layer_id"])
+            if layer is None:
+                continue
+            found = next(layer.getFeatures(QgsFeatureRequest(feature["fid"])), None)
+            if found is None or not found.hasGeometry():
+                continue
+            geometry = QgsGeometry(found.geometry())
+            if layer.crs() != project.crs():
+                geometry.transform(QgsCoordinateTransform(layer.crs(), project.crs(), project))
+            if geometry.isEmpty():
+                continue
+            contains = geometry.contains(point)
+            gap = geometry.distance(point)
+            if not contains and gap > tolerance:
+                continue
+            ranked.append((0 if contains else 1, geometry.area() if contains else gap, feature))
+        if not ranked:
+            return None
+        ranked.sort(key=lambda item: (item[0], item[1]))
+        return ranked[0][2]
+
+    def _same_feature(self, features, feature):
+        if feature is None:
+            return None
+        for item in features:
+            if item.get("layer_id") == feature.get("layer_id") and item.get("fid") == feature.get("fid"):
+                return item
+        return feature
 
     def _enclose(self, canvas_point):
         project = QgsProject.instance()
@@ -268,27 +532,40 @@ class OspConnectivityPlugin:
 
         layers, infos, store = ensure_project(project, layers, infos)
         features = read_features(project, layers, infos)
-        # The click results were collected before ensure_project. Fids are unchanged.
-        enclosure = self._next_enclosure_id(features, through[0][0], store)
+        existing_enclosures = [
+            feature_id(feature) for feature in features if feature.get("role") == "splice_enc" and feature_id(feature)
+        ]
+        suggested = suggest_enclosure_prefix(feature_id(through[0][0]) or "")
         strand_keys = existing_keys(features, read_tables(layers, infos))["strands"]
-        session = EditSession()
+        reserved = []
+        planned = []
         try:
-            add_enclosure_point(session, project, store["splice_enc"], point_xy, enclosure)
-            created_segments = []
-            reserved = []
-            for feature, result in through:
+            for index, (feature, result) in enumerate(through):
                 known = self._ids_on_layer(features, feature["layer_id"]) + reserved
                 new_id = next_id(known, feature_id(feature) or "OSP-0000")
                 reserved.append(new_id)
+                edits = self._ask_splice(
+                    feature,
+                    new_id,
+                    laterals,
+                    suggested if index == 0 else planned[0][3]["prefix"],
+                    index == 0,
+                )
+                planned.append((feature, result, new_id, edits))
+        except Cancelled:
+            return
+        enclosure = enclosure_id_from_prefix(existing_enclosures, planned[0][3]["prefix"])
+        session = EditSession()
+        try:
+            add_enclosure_point(session, project, store["splice_enc"], point_xy, enclosure)
+            for feature, result, new_id, edits in planned:
                 split_cable(session, project, layers, infos, feature, result, new_id, enclosure)
-                created_segments.append((feature, new_id))
                 self._membership(session, store, enclosure, feature)
                 self._membership_values(session, store, enclosure, feature["layer_id"], new_id)
+                self._write_splices(session, store, feature, new_id, enclosure, edits, strand_keys)
             for feature, _result in laterals:
                 self._membership(session, store, enclosure, feature)
                 self._label_near_end(session, layers, infos, feature, point_xy, enclosure)
-            for feature, new_id in created_segments:
-                self._splice_pair(session, store, feature, new_id, laterals, enclosure, strand_keys)
             errors = session.commit()
         except Cancelled:
             session.rollback()
@@ -300,19 +577,28 @@ class OspConnectivityPlugin:
             raise RuntimeError("\n".join(errors))
         self.iface.mapCanvas().refresh()
         self._show(
-            f"Enclosure {enclosure} was added. Express strands were written, and any fusion ranges you entered were saved.\n"
+            f"Enclosure {enclosure} was added. The split segments are linked to each other and to the enclosure.\n"
             "Save layer edits to keep this. Undo reverses it until then."
         )
 
-    def _splice_pair(self, session, store, feature, new_id, laterals, enclosure, strand_keys) -> None:
+    def _ask_splice(self, feature, new_id, laterals, prefix, prefix_enabled):
         count = parse_count((feature.get("values") or {}).get("strand_count")) or 0
         targets = [{"id": new_id, "layer_id": feature["layer_id"]}]
         for lateral, _result in laterals:
             targets.append({"id": feature_id(lateral), "layer_id": lateral["layer_id"]})
-        dialog = SpliceDialog(count or 12, feature_id(feature) or "", targets, self.iface.mainWindow())
+        dialog = SpliceDialog(
+            count or 12,
+            feature_id(feature) or "",
+            targets,
+            self.iface.mainWindow(),
+            prefix=prefix or "OSP",
+            prefix_enabled=prefix_enabled,
+        )
         if dialog.exec_() != dialog.Accepted:
             raise Cancelled()
-        edits = dialog.result_edits()
+        return dialog.result_edits()
+
+    def _write_splices(self, session, store, feature, new_id, enclosure, edits, strand_keys) -> None:
         count = edits["strand_count"]
         rows = build_splice_rows(
             count,
@@ -488,11 +774,236 @@ class OspConnectivityPlugin:
     def _ids_on_layer(self, features, layer_id) -> list:
         return [feature_id(feature) for feature in features if feature.get("layer_id") == layer_id and feature_id(feature)]
 
-    def _next_enclosure_id(self, features, cable, store) -> str:
-        existing = [feature_id(feature) for feature in features if feature.get("role") == "splice_enc" and feature_id(feature)]
-        layer = store.get("splice_enc")
-        template_style = bool(layer is not None and "osp_links.gpkg" not in (layer.source() or ""))
-        return enclosure_id(existing, feature_id(cable) or "OSP-0001", template_style)
+    def _add_device(self, canvas_point):
+        project, point_xy, layers, infos, features = self._click_context(canvas_point)
+        choices = device_layer_choices(infos)
+        if not choices:
+            raise RuntimeError("This project has no AP, CCTV, POS, or other device layer to add to.")
+        tolerance = self._tolerance(project)
+        cables = [feature for feature in features if feature.get("role") == "cable"]
+        cable = nearest_cable(point_xy, cables, tolerance)
+        idfs = idfs_serving_cable(cable, features) if cable else []
+        context = self._placement_context(cable, idfs, features, point_xy, ask_media=False)
+        dialog = PlacementDialog(
+            "Add device",
+            "Device type",
+            choices,
+            "Device name",
+            "",
+            taken_device_names(features),
+            context,
+            occupied_ports(features, read_tables(layers, infos).get("terminations") or []),
+            self.iface.mainWindow(),
+        )
+        if dialog.exec_() != dialog.Accepted:
+            return
+        choice = dialog.choices()
+        choice["device_layer_id"] = choice.get("layer_id")
+        if cable:
+            choice["cable_layer_id"] = cable.get("layer_id")
+        layers, infos, store = ensure_project(project, layers, infos)
+        features = read_features(project, layers, infos)
+        cable = self._same_feature(features, cable) if cable else None
+        idf = self._chosen_idf(features, idfs, choice.get("idf_id"))
+        target = layers.get(choice["layer_id"])
+        if target is None:
+            raise RuntimeError("The device layer is no longer in the project.")
+        ensure_id_field(target, choice.get("role") or "pos")
+        layers, infos = scan(project)
+        target = layers.get(choice["layer_id"])
+        info = next(item for item in infos if item.layer_id == choice["layer_id"])
+        plan = placement_edits(
+            choice,
+            cable,
+            None,
+            idf,
+            new_device_id=choice["name"],
+            panel_feature_ids=panel_feature_ids(features),
+            media=choice.get("media") or context.get("media") or "copper",
+        )
+        session = EditSession()
+        try:
+            add_mapped_feature(session, project, target, info, point_xy, plan["device_values"], "point")
+            skipped = apply_plain_edits(session, layers, infos, plan["edits"])
+            panel_note = self._create_panel(session, project, layers, infos, plan.get("new_panel"))
+            self._store_circuit(session, store, plan.get("circuit"))
+            errors = session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        self._placement_report(choice["name"], plan, panel_note, skipped, errors)
+
+    def _add_cable(self, canvas_points):
+        project = QgsProject.instance()
+        canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+        transform = QgsCoordinateTransform(canvas_crs, project.crs(), project)
+        line = []
+        for point in canvas_points:
+            moved = transform.transform(point)
+            line.append((moved.x(), moved.y()))
+        layers, infos = scan(project)
+        features = read_features(project, layers, infos)
+        kinds = cable_layer_choices(infos)
+        if not kinds:
+            raise RuntimeError("This project has no cable layer to add to.")
+        tolerance = self._tolerance(project)
+        devices = features_along_line(line, features, {"ap", "cctv", "data_jack", "pos"}, tolerance)
+        panels = features_along_line(line, features, {"patch_panel", "fdp"}, tolerance)
+        idfs = self._idfs_along_line(project, layers, features, line, tolerance)
+        for panel in panels:
+            parent = text_of((panel.get("values") or {}).get("idf_ref"))
+            if parent and all(feature_id(item) != parent for item in idfs):
+                found = next(
+                    (feature for feature in features if feature.get("role") == "idf" and feature_id(feature) == parent),
+                    None,
+                )
+                if found:
+                    idfs.append(found)
+        device = devices[0] if devices else None
+        if len(devices) > 1:
+            raise RuntimeError("More than one device is on this cable. Place it with one device, or use Associate selection.")
+        associate = bool(device and (idfs or panels))
+        media = media_of((device.get("values") or {}) if device else {})
+        if media == "unknown":
+            media = "copper"
+        if any(media_of(item.get("values") or {}) == "fiber" for item in panels):
+            media = "fiber"
+        context = {
+            "associate": associate,
+            "ask_media": True,
+            "media": media,
+            "idfs": idfs,
+            "panels_by_idf": panels_for_idfs(idfs, features) if idfs else {},
+            "panel_id": feature_id(panels[0]) if panels else "",
+            "device_end": nearer_end_name(line, (device.get("coords") or [None])[0]) if device and device.get("coords") else "a_end",
+            "summary": self._cable_summary(device, idfs, panels),
+        }
+        existing_ids = taken_cable_ids(features)
+        sample = next((item for item in existing_ids if item), "OSP-CB-0000")
+        dialog = PlacementDialog(
+            "Add cable",
+            "Cable layer",
+            kinds,
+            "Cable id",
+            next_id(existing_ids, sample),
+            existing_ids,
+            context,
+            occupied_ports(features, read_tables(layers, infos).get("terminations") or []),
+            self.iface.mainWindow(),
+        )
+        if dialog.exec_() != dialog.Accepted:
+            return
+        choice = dialog.choices()
+        choice["cable_layer_id"] = choice.get("layer_id")
+        if device:
+            choice["device_layer_id"] = device.get("layer_id")
+        layers, infos, store = ensure_project(project, layers, infos)
+        features = read_features(project, layers, infos)
+        device = self._same_feature(features, device) if device else None
+        idf = self._chosen_idf(features, idfs, choice.get("idf_id"))
+        target = layers.get(choice["layer_id"])
+        info = next(item for item in infos if item.layer_id == choice["layer_id"])
+        plan = placement_edits(
+            choice,
+            None,
+            device,
+            idf,
+            new_cable_id=choice["name"],
+            panel_feature_ids=panel_feature_ids(features),
+            media=choice.get("media") or "copper",
+        )
+        session = EditSession()
+        try:
+            add_mapped_feature(session, project, target, info, line, plan["cable_values"], "line")
+            skipped = apply_plain_edits(session, layers, infos, plan["edits"])
+            panel_note = self._create_panel(session, project, layers, infos, plan.get("new_panel"))
+            self._store_circuit(session, store, plan.get("circuit"))
+            errors = session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        self._placement_report(choice["name"], plan, panel_note, skipped, errors)
+
+    def _placement_context(self, cable, idfs, features, point, ask_media):
+        if cable is None:
+            return {"associate": False, "ask_media": ask_media, "media": "copper"}
+        media = media_of(cable.get("values") or {})
+        if media == "unknown":
+            media = "copper"
+        return {
+            "associate": True,
+            "ask_media": ask_media,
+            "media": media,
+            "idfs": idfs,
+            "panels_by_idf": panels_for_idfs(idfs, features) if idfs else {},
+            "device_end": nearer_end_name(cable.get("coords") or [], point),
+            "summary": f"Cable: {feature_id(cable) or '?'}",
+        }
+
+    def _cable_summary(self, device, idfs, panels) -> str:
+        parts = []
+        if device:
+            parts.append(f"Device: {feature_id(device) or '?'}")
+        if idfs:
+            parts.append("IDF: " + ", ".join(feature_id(item) or "?" for item in idfs))
+        if panels:
+            parts.append("Panel: " + ", ".join(feature_id(item) or "?" for item in panels))
+        return "\n".join(parts)
+
+    def _chosen_idf(self, features, idfs, idf_id):
+        wanted = text_of(idf_id)
+        refreshed = [item for item in (self._same_feature(features, item) for item in idfs) if item]
+        if wanted:
+            match = next((item for item in refreshed if feature_id(item) == wanted), None)
+            if match:
+                return match
+            return next((item for item in features if item.get("role") == "idf" and feature_id(item) == wanted), None)
+        return refreshed[0] if refreshed else None
+
+    def _idfs_along_line(self, project, layers, features, line, tolerance):
+        geometry = QgsGeometry.fromPolylineXY([QgsPointXY(point[0], point[1]) for point in line])
+        found = []
+        for feature in features:
+            if feature.get("role") != "idf":
+                continue
+            layer = layers.get(feature["layer_id"])
+            if layer is None:
+                continue
+            existing = next(layer.getFeatures(QgsFeatureRequest(feature["fid"])), None)
+            if existing is None or not existing.hasGeometry():
+                continue
+            candidate = QgsGeometry(existing.geometry())
+            if layer.crs() != project.crs():
+                candidate.transform(QgsCoordinateTransform(layer.crs(), project.crs(), project))
+            if candidate.intersects(geometry) or candidate.distance(geometry) <= tolerance:
+                found.append(feature)
+        return found
+
+    def _click_context(self, canvas_point):
+        project = QgsProject.instance()
+        transform = QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), project.crs(), project)
+        point = transform.transform(canvas_point)
+        layers, infos = scan(project)
+        return project, (point.x(), point.y()), layers, infos, read_features(project, layers, infos)
+
+    def _store_circuit(self, session, store, circuit) -> None:
+        if not circuit or not store:
+            return
+        apply_inserts(session, store, [RowInsert("circuit", circuit, "circuit")])
+
+    def _placement_report(self, name, plan, panel_note, skipped, errors) -> None:
+        if errors:
+            raise RuntimeError("\n".join(errors))
+        lines = [f"{name} was added."]
+        if plan.get("warnings"):
+            lines.extend(f"Warning: {warning}" for warning in plan["warnings"])
+        if panel_note:
+            lines.append(panel_note)
+        for note in skipped:
+            lines.append(f"Skipped field: {note}")
+        lines.append("Save layer edits to keep this. Undo reverses it until then.")
+        self._show("\n".join(lines))
+        self.iface.mapCanvas().refresh()
 
     def _tolerance(self, project) -> float:
         settings = QgsSettings()

@@ -4,9 +4,11 @@ import unittest
 
 from osp_connectivity.core.associate import assignment_edits, port_in_use, propose
 from osp_connectivity.core.catalog import build_index, end_convention
-from osp_connectivity.core.fields import enclosure_id, media_of, next_id, parse_count, parse_range
+from osp_connectivity.core.fields import enclosure_id, enclosure_id_from_prefix, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix
 from osp_connectivity.core.geometry import chain_segments, ducts_along_cable, split_linestring
 from osp_connectivity.core.link import plan_links
+from osp_connectivity.core.panels import cable_idf_edits, panels_for, suggest_panel_id
+from osp_connectivity.core.place import device_layer_choices, name_taken, panel_click_edits, panel_media_groups, placement_edits
 from osp_connectivity.core.roles import classify
 from osp_connectivity.core.strands import build_splice_rows, compress_splices, validate_edits
 from osp_connectivity.core.trace import format_report, trace_selection
@@ -36,7 +38,9 @@ class SchemaTests(unittest.TestCase):
     def test_template_and_ncl_layers_classify(self):
         self.assertEqual(classify("Line", ["cable_id", "media_type", "gis_length_m"]), "cable")
         self.assertEqual(classify("Line", ["segment_id", "duct_config"]), "duct")
-        self.assertEqual(classify("Point", ["ap_id", "support_id"]), "ap")
+        self.assertEqual(classify("Point", ["device_id", "antenna_type", "support_id"]), "ap")
+        self.assertEqual(classify("Point", ["device_id", "camera_type", "support_id"]), "cctv")
+        self.assertEqual(classify("Point", ["pos_id"]), "pos")
         self.assertEqual(classify("Point", ["cctv_id"]), "cctv")
         self.assertEqual(classify("Polygon", ["mdf_idf_id"]), "idf")
         self.assertEqual(classify("Point", ["pp_id", "mdf_idf_id", "port_count"]), "patch_panel")
@@ -232,6 +236,8 @@ class AssociateAndTraceTests(unittest.TestCase):
         self.assertEqual(edits[(1, "z_panel")], "RR02.PP01")
         self.assertEqual(edits[(4, "cable_ref")], "vib.cpr.0008")
         self.assertEqual([route["segment_id"] for route in result["routes"]], ["0001", "0002"])
+        self.assertEqual(result["new_panel"]["panel_id"], "RR02.PP01")
+        self.assertEqual(result["new_panel"]["idf_id"], "VIB-IDF-0002")
         self.assertTrue(port_in_use([("RR02.PP01", "14")], "rr02.pp01", "14"))
         self.assertFalse(port_in_use([("RR02.PP01", "1-2")], "RR02.PP01", "3-4"))
 
@@ -277,6 +283,245 @@ class AssociateAndTraceTests(unittest.TestCase):
         self.assertEqual(result["highlights"]["cables"], [("cables", 1)])
         self.assertEqual(result["highlights"]["idfs"], [("idfs", 2)])
         self.assertFalse(any(item[0] == "db" for item in result["highlights"]["cables"]))
+
+    def test_trace_reports_split_segments_and_their_enclosure(self):
+        first = feature(
+            "cable",
+            1,
+            "CB-0001",
+            {"media": "fiber", "strand_count": 12, "z_end": "EN-0001"},
+            coords=[(0, 0), (5, 0)],
+            layer_id="cables",
+        )
+        second = feature(
+            "cable",
+            2,
+            "CB-0002",
+            {"media": "fiber", "strand_count": 12, "a_end": "EN-0001"},
+            coords=[(5, 0), (10, 0)],
+            layer_id="cables",
+        )
+        enclosure = feature("splice_enc", 8, "EN-0001", coords=[(5, 0)], layer_id="enc", geometry="Point")
+        splices = [
+            {
+                "splice_enc_id": "EN-0001",
+                "a_cable_id": "CB-0001",
+                "a_strand_no": 1,
+                "b_cable_id": "CB-0002",
+                "b_strand_no": 1,
+                "splice_type": "EXPRESS",
+            }
+        ]
+        memberships = [
+            {"splice_enc_id": "EN-0001", "cable_id": "CB-0001"},
+            {"splice_enc_id": "EN-0001", "cable_id": "CB-0002"},
+        ]
+        result = trace_selection(
+            [second],
+            [first, second, enclosure],
+            {"splices": splices, "memberships": memberships, "routes": [], "circuits": []},
+        )
+        text = format_report(result)
+        self.assertIn("Segments: CB-0002 > CB-0001", text)
+        self.assertIn("Enclosures: EN-0001", text)
+        highlighted = {item[1] for item in result["highlights"]["cables"]}
+        self.assertEqual(highlighted, {1, 2})
+        self.assertEqual(result["highlights"]["enclosures"], [("enc", 8)])
+
+    def test_panel_list_follows_the_idf_and_a_new_name_creates_one(self):
+        idf_a = feature("idf", 1, "IDF-1", coords=[(0, 0)], geometry="Point", layer_id="idfs")
+        idf_b = feature("idf", 2, "IDF-2", coords=[(10, 0)], geometry="Point", layer_id="idfs")
+        panel_a = feature("patch_panel", 3, "PP-1", {"idf_ref": "IDF-1"}, geometry="Point", layer_id="pp")
+        panel_b = feature("patch_panel", 4, "PP-2", {"idf_ref": "IDF-2"}, geometry="Point", layer_id="pp")
+        cable = feature(
+            "cable",
+            5,
+            "CB-1",
+            {"media": "copper", "z_end": "IDF-1", "z_panel": "PP-1"},
+            coords=[(0, 0), (1, 0)],
+            layer_id="cables",
+        )
+        features = [idf_a, idf_b, panel_a, panel_b, cable]
+        self.assertEqual(panels_for(["IDF-1"], features, build_index(features)), ["PP-1"])
+        self.assertEqual(panels_for(["IDF-2"], features, build_index(features)), ["PP-2"])
+        proposal = propose([cable, idf_a], features, 1)
+        self.assertEqual(proposal.panels_by_idf["IDF-1"], ["PP-1"])
+        self.assertNotIn("PP-2", proposal.panels_by_idf["IDF-1"])
+        kept = assignment_edits(
+            proposal,
+            {"a_role": "device", "z_role": "idf", "idf_id": "IDF-1", "panel_id": "PP-1", "port": "1"},
+        )
+        self.assertIsNone(kept["new_panel"])
+        created = assignment_edits(
+            proposal,
+            {"a_role": "device", "z_role": "idf", "idf_id": "IDF-1", "panel_id": "PP-9", "port": "2"},
+        )
+        self.assertEqual(created["new_panel"]["panel_id"], "PP-9")
+        self.assertEqual(created["new_panel"]["idf_id"], "IDF-1")
+        self.assertEqual((created["new_panel"]["x"], created["new_panel"]["y"]), (0, 0))
+
+    def test_click_at_an_idf_labels_the_near_cable_end(self):
+        cable = feature(
+            "cable",
+            1,
+            "CB-1",
+            {"a_end": "AP-1", "z_end": None},
+            coords=[(0, 0), (10, 0)],
+            layer_id="cables",
+        )
+        edits, warnings = cable_idf_edits(cable, "IDF-1", "PP-1", (10, 0))
+        saved = {(edit["canonical"], edit["value"]) for edit in edits}
+        self.assertIn(("z_end", "IDF-1"), saved)
+        self.assertIn(("z_panel", "PP-1"), saved)
+        self.assertFalse(warnings)
+        filled = feature(
+            "cable",
+            1,
+            "CB-1",
+            {"z_end": "OTHER", "z_panel": "KEEP"},
+            coords=[(0, 0), (10, 0)],
+            layer_id="cables",
+        )
+        edits, warnings = cable_idf_edits(filled, "IDF-1", "PP-1", (10, 0))
+        self.assertFalse(edits)
+        self.assertTrue(warnings)
+        self.assertEqual(suggest_panel_id([], "VIB-IDF-0001", False, True), "VIB-PP-0001")
+        self.assertEqual(suggest_enclosure_prefix("VIB-CB-0001"), "VIB")
+        self.assertEqual(suggest_enclosure_prefix("vib.fib.0004"), "VIB")
+        self.assertEqual(enclosure_id_from_prefix([], "OSP"), "OSP-EN-0001")
+        self.assertEqual(enclosure_id_from_prefix(["VIB-EN-0002"], "VIB"), "VIB-EN-0003")
+
+    def test_new_device_on_a_cable_links_the_blank_end_and_can_add_a_panel(self):
+        cable = feature(
+            "cable",
+            1,
+            "CB-1",
+            {"media": "copper", "z_end": None, "a_end": None},
+            coords=[(0, 0), (10, 0)],
+            layer_id="cables",
+        )
+        idf = feature("idf", 2, "IDF-1", coords=[(10, 0)], geometry="Point", layer_id="idfs")
+        choices = {
+            "associate": True,
+            "a_role": "device",
+            "z_role": "idf",
+            "panel_id": "PP-9",
+            "port": "4",
+            "device_layer_id": "aps",
+            "cable_layer_id": "cables",
+        }
+        plan = placement_edits(choices, cable, None, idf, new_device_id="AP-9", panel_feature_ids=[], media="copper")
+        edits = {(edit["canonical"], edit["value"]) for edit in plan["edits"]}
+        self.assertIn(("a_end", "AP-9"), edits)
+        self.assertIn(("z_end", "IDF-1"), edits)
+        self.assertIn(("z_panel", "PP-9"), edits)
+        self.assertEqual(plan["device_values"]["cable_ref"], "CB-1")
+        self.assertEqual(plan["new_panel"]["panel_id"], "PP-9")
+        self.assertEqual(plan["new_panel"]["idf_id"], "IDF-1")
+        filled = feature("cable", 1, "CB-1", {"a_end": "KEEP"}, coords=[(0, 0), (10, 0)], layer_id="cables")
+        kept = placement_edits(choices, filled, None, idf, new_device_id="AP-9", media="copper")
+        self.assertFalse(any(edit["canonical"] == "a_end" for edit in kept["edits"]))
+        self.assertTrue(kept["warnings"])
+
+    def test_new_cable_links_a_device_and_idf(self):
+        device = feature("ap", 4, "AP-1", {"cable_ref": None}, coords=[(0, 0)], geometry="Point", layer_id="aps")
+        idf = feature("idf", 2, "IDF-1", coords=[(8, 0)], geometry="Point", layer_id="idfs")
+        choices = {
+            "associate": True,
+            "a_role": "device",
+            "z_role": "idf",
+            "panel_id": "PP-1",
+            "port": "1",
+            "cable_layer_id": "cables",
+            "device_layer_id": "aps",
+        }
+        plan = placement_edits(choices, None, device, idf, new_cable_id="CB-3", panel_feature_ids=["PP-1"], media="copper")
+        self.assertEqual(plan["cable_values"]["a_end"], "AP-1")
+        self.assertEqual(plan["cable_values"]["z_end"], "IDF-1")
+        self.assertEqual(plan["cable_values"]["z_panel"], "PP-1")
+        self.assertIn(("cable_ref", "CB-3"), {(edit["canonical"], edit["value"]) for edit in plan["edits"]})
+        self.assertIsNone(plan["new_panel"])
+        layers = [
+            {"layer_id": "pos", "name": "POS", "role": None, "geometry_type": "Point"},
+            {"layer_id": "aps", "name": "AP", "role": "ap", "geometry_type": "Point"},
+            {"layer_id": "poles", "name": "Poles", "role": "structure", "geometry_type": "Point"},
+        ]
+        labels = [item["label"] for item in device_layer_choices(layers)]
+        self.assertEqual(labels, ["POS", "AP"])
+        self.assertTrue(name_taken("AP-1", ["ap-1"]))
+
+    def test_patch_panel_click_keeps_copper_and_fiber_apart(self):
+        copper = feature(
+            "cable",
+            1,
+            "CB-1",
+            {"media": "copper"},
+            coords=[(0, 0), (10, 0)],
+            layer_id="copper",
+        )
+        fiber = feature(
+            "cable",
+            2,
+            "FB-1",
+            {"media": "fiber", "strand_count": 12},
+            coords=[(10, 0), (20, 0)],
+            layer_id="fiber",
+        )
+        device = feature("ap", 4, "AP-1", coords=[(0, 0)], geometry="Point", layer_id="aps")
+        idf = feature("idf", 5, "IDF-1", coords=[(10, 0)], geometry="Point", layer_id="idfs")
+        groups = panel_media_groups((10, 0), [copper, fiber, device, idf], 1)
+        self.assertEqual([group["media"] for group in groups], ["copper", "fiber"])
+        self.assertEqual(groups[0]["device"]["id"], "AP-1")
+        self.assertIsNone(groups[1]["device"])
+        copper_plan = panel_click_edits(
+            {"panel_id": "PP-1", "port": "4", "a_role": "device", "z_role": "idf"},
+            groups[0]["cables"],
+            groups[0]["cable"],
+            groups[0]["device"],
+            idf,
+            (10, 0),
+            [],
+            "copper",
+        )
+        fiber_plan = panel_click_edits(
+            {"panel_id": "FD-1", "port": "1", "strands": "1-2", "a_role": "idf", "z_role": "device"},
+            groups[1]["cables"],
+            groups[1]["cable"],
+            None,
+            idf,
+            (10, 0),
+            [],
+            "fiber",
+        )
+        copper_edits = {(edit["canonical"], edit["value"]) for edit in copper_plan["edits"]}
+        self.assertIn(("a_end", "AP-1"), copper_edits)
+        self.assertIn(("z_end", "IDF-1"), copper_edits)
+        self.assertIn(("z_panel", "PP-1"), copper_edits)
+        self.assertIn(("cable_ref", "CB-1"), copper_edits)
+        self.assertEqual(copper_plan["new_panel"]["media"], "copper")
+        self.assertEqual(copper_plan["new_panel"]["x"], 10)
+        self.assertEqual(fiber_plan["new_panel"]["media"], "fiber")
+        self.assertEqual(fiber_plan["cable_values"].get("z_panel"), None)
+        fiber_edits = {(edit["canonical"], edit["value"]) for edit in fiber_plan["edits"]}
+        self.assertIn(("a_end", "IDF-1"), fiber_edits)
+        self.assertIn(("a_panel", "FD-1"), fiber_edits)
+        self.assertEqual(fiber_plan["circuit"]["strand_from"], 1)
+        self.assertEqual(fiber_plan["circuit"]["strand_to"], 2)
+        self.assertNotIn("PP-1", {edit["value"] for edit in fiber_plan["edits"]})
+        filled = feature("cable", 1, "CB-1", {"z_end": "KEEP"}, coords=[(0, 0), (10, 0)], layer_id="copper")
+        kept = panel_click_edits(
+            {"panel_id": "PP-1", "port": "4", "a_role": "device", "z_role": "idf"},
+            [filled],
+            filled,
+            device,
+            idf,
+            (10, 0),
+            ["PP-1"],
+            "copper",
+        )
+        self.assertFalse(any(edit["canonical"] == "z_end" for edit in kept["edits"]))
+        self.assertIsNone(kept["new_panel"])
+        self.assertTrue(kept["warnings"])
 
 
 if __name__ == "__main__":

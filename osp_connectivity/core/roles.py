@@ -64,12 +64,14 @@ def classify(geometry_type: str, field_names: Iterable[str]) -> Optional[str]:
         return "fdp"
     if "splice_enc_id" in names:
         return "splice_enc"
-    if "ap_id" in names:
-        return "ap"
-    if "cctv_id" in names:
-        return "cctv"
     if "jack_id" in names:
         return "data_jack"
+    if "pos_id" in names:
+        return "pos"
+    if "camera_type" in names or "cctv_id" in names:
+        return "cctv"
+    if "ap_id" in names or any(name in names for name in ("antenna_type", "antenna_model", "uplink_type")):
+        return "ap"
     if "idf_id" in names or "mdf_idf_id" in names:
         return "idf"
     if "access_id" in names:
@@ -78,8 +80,6 @@ def classify(geometry_type: str, field_names: Iterable[str]) -> Optional[str]:
         return "handhole"
     if "support_id" in names or "wifi_present" in names or "cctv_present" in names:
         return "structure"
-    if "device_id" in names and ("antenna_type" in names or "uplink_type" in names or "antenna_model" in names):
-        return "ap"
     if "building_id" in names and "idf_id" not in names:
         return "building"
     if "structure_id" in names:

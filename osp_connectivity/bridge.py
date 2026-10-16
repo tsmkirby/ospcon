@@ -124,7 +124,7 @@ def read_features(project: QgsProject, layers: dict, infos: list) -> list[dict]:
 
 
 def read_tables(layers: dict, infos: list) -> dict:
-    tables = {"circuits": [], "splices": [], "routes": [], "strands": [], "terminations": [], "mounts": []}
+    tables = {"circuits": [], "splices": [], "routes": [], "strands": [], "terminations": [], "mounts": [], "memberships": []}
     role_to_bucket = {
         "circuit": "circuits",
         "fiber_splice": "splices",
@@ -133,6 +133,7 @@ def read_tables(layers: dict, infos: list) -> dict:
         "fiber_termination": "terminations",
         "copper_termination": "terminations",
         "mounted_device": "mounts",
+        "splice_enc_cable": "memberships",
     }
     for info in infos:
         bucket = role_to_bucket.get(info.role)
@@ -360,6 +361,101 @@ def add_enclosure_point(session, project, layer, point, enclosure_id: str) -> No
             feature.setAttribute(index, value)
     if not layer.addFeature(feature):
         raise RuntimeError("Could not add the splice enclosure.")
+
+
+def ensure_panel_layer(project: QgsProject, layers: dict, infos: list, fiber: bool):
+    """Use the project's copper or fiber panel layer, or create one beside the project."""
+    preferred = "fdp" if fiber else "patch_panel"
+    for info in infos:
+        if info.role == preferred:
+            return layers, infos, layers[info.layer_id]
+    target = _sidecar_path(project)
+    if not target:
+        raise RuntimeError("Save the QGIS project before adding a patch panel.")
+    if fiber:
+        layer_name, title = "osp_fiber_panels", "OSP Fiber Panels"
+        fields = [
+            QgsField("fdp_id", QVariant.String),
+            QgsField("fdp_name", QVariant.String),
+            QgsField("status", QVariant.String),
+            QgsField("mdf_idf_id", QVariant.String),
+            QgsField("media_type", QVariant.String),
+        ]
+    else:
+        layer_name, title = "osp_patch_panels", "OSP Patch Panels"
+        fields = [
+            QgsField("pp_id", QVariant.String),
+            QgsField("pp_name", QVariant.String),
+            QgsField("status", QVariant.String),
+            QgsField("mdf_idf_id", QVariant.String),
+            QgsField("media_type", QVariant.String),
+        ]
+    _write_layer(project, target, layer_name, title, "Point", fields)
+    layers, infos = scan(project)
+    for info in infos:
+        if info.role == preferred and layer_name in (info.source or ""):
+            return layers, infos, layers[info.layer_id]
+    for info in infos:
+        if info.role == preferred:
+            return layers, infos, layers[info.layer_id]
+    raise RuntimeError("Could not open the patch panel layer after creating it.")
+
+
+def add_mapped_feature(session, project, layer, info, geometry, values: dict, kind: str):
+    """Add a point or line and set the canonical fields that this layer actually has."""
+    session.edit(layer)
+    created = QgsFeature(layer.fields())
+    qgs_geometry = None
+    if kind == "line" and geometry:
+        qgs_geometry = line_geometry(geometry, project, layer)
+    elif kind == "point" and geometry is not None:
+        qgs_geometry = point_geometry(geometry, project, layer)
+    if qgs_geometry is not None and layer.geometryType() != QgsWkbTypes.NullGeometry:
+        created.setGeometry(qgs_geometry)
+    for canonical, value in values.items():
+        if value is not None:
+            _set_field(created, info, canonical, value)
+    if kind == "line" and qgs_geometry is not None:
+        _set_length(created, info, qgs_geometry, layer)
+    if not layer.addFeature(created):
+        raise RuntimeError(f"Could not add the feature on {layer.name()}.")
+    return created.id()
+
+
+def ensure_id_field(layer, role: str) -> None:
+    """Give a geometry-only layer an id field so a new device name can be stored."""
+    from .core.fields import id_candidates
+
+    names = {field.name().casefold() for field in layer.fields()}
+    candidates = id_candidates(role) or ["device_id"]
+    if any(candidate.casefold() in names for candidate in candidates):
+        return
+    added = layer.dataProvider().addAttributes(
+        [
+            QgsField(candidates[0], QVariant.String),
+            QgsField("device_name", QVariant.String),
+            QgsField("status", QVariant.String),
+        ]
+    )
+    if not added:
+        raise RuntimeError(f"Could not add an id field on {layer.name()}.")
+    layer.updateFields()
+
+
+def add_panel_feature(session, project, layer, info, point, panel_id: str, idf_id: str, media: str) -> None:
+    if point is None:
+        raise RuntimeError(f"{idf_id} has no location, so the patch panel was not created.")
+    session.edit(layer)
+    created = QgsFeature(layer.fields())
+    if layer.geometryType() != QgsWkbTypes.NullGeometry:
+        created.setGeometry(point_geometry(point, project, layer))
+    _set_field(created, info, "id", panel_id)
+    _set_field(created, info, "name", panel_id)
+    _set_field(created, info, "idf_ref", idf_id)
+    _set_field(created, info, "status", "proposed")
+    _set_field(created, info, "media", "fiber" if media == "fiber" else "copper")
+    if not layer.addFeature(created):
+        raise RuntimeError("Could not add the patch panel.")
 
 
 def _first_id(role, attrs: dict):

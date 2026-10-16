@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .catalog import DEVICE_ROLES, build_index, end_convention, feature_id, resolve_end
+from .catalog import DEVICE_ROLES, build_index, end_convention, feature_id
 from .fields import media_of, ranges_overlap, text_of
 from .geometry import chain_segments
+from .panels import new_panel_request, panel_feature_ids, panels_for
 from .strands import strand_numbers_for
 
 
@@ -23,6 +24,8 @@ class AssociationProposal:
     media: str
     convention: str
     panels: list[str] = field(default_factory=list)
+    panels_by_idf: dict = field(default_factory=dict)
+    panel_feature_ids: list = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -68,7 +71,8 @@ def propose(selected: list[dict], project_features: list[dict], tolerance: float
         [feature for feature in project_features if feature.get("role") == "cable"],
         index,
     )
-    panels = _panels_for(idfs, project_features, index)
+    panels_by_idf = {feature_id(idf) or "": panels_for([feature_id(idf) or ""], project_features, index) for idf in idfs}
+    panels = panels_by_idf.get(feature_id(idfs[0]) or "", []) if idfs else panels_for([], project_features, index)
     return AssociationProposal(
         cables=ordered_cables,
         devices=devices,
@@ -81,38 +85,10 @@ def propose(selected: list[dict], project_features: list[dict], tolerance: float
         media=media,
         convention=convention,
         panels=panels,
+        panels_by_idf=panels_by_idf,
+        panel_feature_ids=panel_feature_ids(project_features),
         warnings=warnings,
     )
-
-
-def _panels_for(idfs: list[dict], features: list[dict], index: dict) -> list[str]:
-    """Panels already used on cables that land on the selected IDF, plus real panel features."""
-    found: list[str] = []
-
-    def add(value) -> None:
-        text = text_of(value)
-        if text and text.casefold() not in {item.casefold() for item in found}:
-            found.append(text)
-
-    idf_ids = {(feature_id(idf) or "").casefold() for idf in idfs}
-    for feature in features:
-        if feature.get("role") in ("patch_panel", "fdp"):
-            parent = text_of((feature.get("values") or {}).get("mount")) or text_of(
-                (feature.get("values") or {}).get("a_end")
-            )
-            # Template panels store the IDF on mdf_idf_id, mapped as... we don't have that canonical.
-            # The bridge copies mdf_idf_id into values['idf_ref'] when the field exists.
-            parent = text_of((feature.get("values") or {}).get("idf_ref")) or parent
-            if not idf_ids or (parent or "").casefold() in idf_ids:
-                add(feature_id(feature))
-        if feature.get("role") != "cable" or not idf_ids:
-            continue
-        values = feature.get("values") or {}
-        for end_name, panel_key in (("a_end", "a_panel"), ("z_end", "z_panel")):
-            hits = resolve_end(index, values.get(end_name), feature)
-            if any((feature_id(hit) or "").casefold() in idf_ids for hit in hits if hit.get("role") == "idf"):
-                add(values.get(panel_key))
-    return found
 
 
 def occupied_ports(features: list[dict], terminations: list[dict]) -> list[tuple[str, str]]:
@@ -265,4 +241,11 @@ def assignment_edits(proposal: AssociationProposal, choices: dict) -> dict:
             "status": text_of((served.get("values") or {}).get("status")) or "proposed",
         }
 
-    return {"edits": edits, "circuit": circuit, "routes": routes, "mount": mount, "warnings": warnings}
+    return {
+        "edits": edits,
+        "circuit": circuit,
+        "routes": routes,
+        "mount": mount,
+        "new_panel": new_panel_request(panel, idf, proposal.media, proposal.panel_feature_ids) if idf else None,
+        "warnings": warnings,
+    }

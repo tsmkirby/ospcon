@@ -20,12 +20,14 @@ from qgis.PyQt.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from .core.associate import port_in_use
 from .core.catalog import feature_id
 from .core.export import COLUMNS, item_label
 from .core.fields import parse_count, parse_range
+from .core.place import name_taken
 from .core.strands import build_splice_rows, compress_splices, validate_edits
 
 
@@ -74,8 +76,6 @@ class AssociateDialog(QDialog):
 
         self.panel = QComboBox()
         self.panel.setEditable(True)
-        for name in proposal.panels:
-            self.panel.addItem(name)
         form.addRow("Panel", self.panel)
         self.port = QLineEdit()
         form.addRow("Port", self.port)
@@ -85,6 +85,8 @@ class AssociateDialog(QDialog):
         form.addRow("Fiber strands", self.strands)
         self.strands.setVisible(proposal.media == "fiber")
         layout.addLayout(form)
+        self._refill_panels()
+        self.idf.currentIndexChanged.connect(self._refill_panels)
 
         layout.addWidget(QLabel("Duct order"))
         self.ducts = QListWidget()
@@ -146,14 +148,26 @@ class AssociateDialog(QDialog):
             "strands": self.strands.text().strip(),
         }
 
+    def _refill_panels(self) -> None:
+        current = self.panel.currentText().strip()
+        idf_id = self.idf.currentData() or self.idf.currentText()
+        names = self.proposal.panels_by_idf.get(idf_id, self.proposal.panels)
+        self.panel.blockSignals(True)
+        self.panel.clear()
+        for name in names:
+            self.panel.addItem(name)
+        if current:
+            self.panel.setCurrentText(current)
+        self.panel.blockSignals(False)
+
 
 class SpliceDialog(QDialog):
-    def __init__(self, strand_count: int, from_cable: str, targets: list[dict], parent=None):
+    def __init__(self, strand_count: int, from_cable: str, targets: list[dict], parent=None, prefix: str = "OSP", prefix_enabled: bool = True):
         super().__init__(parent)
         self.from_cable = from_cable
         self.targets = targets
         self.setWindowTitle("Fiber enclosure")
-        self.resize(560, 460)
+        self.resize(560, 500)
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
@@ -162,6 +176,10 @@ class SpliceDialog(QDialog):
             )
         )
         form = QFormLayout()
+        self.prefix = QLineEdit(prefix or "OSP")
+        self.prefix.setPlaceholderText("VIB")
+        self.prefix.setEnabled(prefix_enabled)
+        form.addRow("Enclosure prefix", self.prefix)
         self.count = QSpinBox()
         self.count.setRange(1, 864)
         self.count.setValue(max(1, strand_count or 1))
@@ -251,6 +269,9 @@ class SpliceDialog(QDialog):
         self.preview.setText("\n".join(compress_splices(rows)) or "No strands.")
 
     def _accept(self) -> None:
+        if not self.prefix.text().strip():
+            QMessageBox.warning(self, "Fiber enclosure", "Enter an enclosure prefix, such as VIB or OSP.")
+            return
         problems = validate_edits(self.count.value(), self._fusions(), self._open_ranges())
         if problems:
             QMessageBox.warning(self, "Fiber enclosure", "\n".join(problems))
@@ -262,6 +283,7 @@ class SpliceDialog(QDialog):
             "strand_count": self.count.value(),
             "fusions": self._fusions(),
             "opens": self._open_ranges(),
+            "prefix": self.prefix.text().strip(),
         }
 
 
@@ -347,4 +369,257 @@ class ExportDialog(QDialog):
         if not choice["fields"]:
             QMessageBox.warning(self, "Export report", "Select at least one field.")
             return
+        self.accept()
+
+
+class PatchPanelDialog(QDialog):
+    """Name the panel added on an IDF. Copper and fiber cables are named separately."""
+
+    def __init__(self, idf_id: str, groups: list[dict], suggestions: dict, taken, occupied, parent=None):
+        super().__init__(parent)
+        self.groups = groups or []
+        self.suggestions = suggestions or {}
+        self.taken = list(taken or [])
+        self.occupied = occupied or []
+        self.rows = []
+        self.setWindowTitle("Add patch panel")
+        self.resize(460, 420)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"IDF: {idf_id}"))
+        if not self.groups:
+            form = QFormLayout()
+            self.panel = QLineEdit(self.suggestions.get("copper") or "")
+            self._suggested = self.panel.text()
+            form.addRow("Panel id", self.panel)
+            self.media = QComboBox()
+            self.media.addItem("Copper", "copper")
+            self.media.addItem("Fiber", "fiber")
+            self.media.currentIndexChanged.connect(self._follow_media)
+            form.addRow("Panel", self.media)
+            layout.addLayout(form)
+        else:
+            self.panel = None
+            for group in self.groups:
+                title = "Fiber" if group.get("media") == "fiber" else "Copper"
+                box = QGroupBox(title)
+                form = QFormLayout(box)
+                cables = ", ".join(group.get("cable_ids") or []) or "none"
+                summary = f"Cables: {cables}"
+                if group.get("device_id"):
+                    summary += f"\nDevice: {group['device_id']}"
+                form.addRow(QLabel(summary))
+                panel = QLineEdit(self.suggestions.get(group.get("media")) or "")
+                form.addRow("Panel id", panel)
+                a_end = QComboBox()
+                z_end = QComboBox()
+                for combo in (a_end, z_end):
+                    combo.addItems(["device", "idf"])
+                if group.get("idf_end") == "a_end":
+                    a_end.setCurrentText("idf")
+                    z_end.setCurrentText("device")
+                else:
+                    a_end.setCurrentText("device")
+                    z_end.setCurrentText("idf")
+                form.addRow("A end", a_end)
+                form.addRow("Z end", z_end)
+                port = QLineEdit()
+                form.addRow("Port", port)
+                strands = QLineEdit()
+                strands.setPlaceholderText("1-2")
+                if group.get("media") == "fiber":
+                    form.addRow("Fiber strands", strands)
+                self.rows.append({"panel": panel, "a_end": a_end, "z_end": z_end, "port": port, "strands": strands})
+                layout.addWidget(box)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _follow_media(self) -> None:
+        media = self.media.currentData()
+        suggested = self.suggestions.get(media) or ""
+        if self.panel.text().strip() == (self._suggested or ""):
+            self.panel.setText(suggested)
+        self._suggested = suggested
+
+    def _accept(self) -> None:
+        names = []
+        if not self.groups:
+            panel = self.panel.text().strip()
+            if not panel:
+                QMessageBox.warning(self, "Add patch panel", "Enter a panel id.")
+                return
+            if name_taken(panel, self.taken):
+                QMessageBox.warning(self, "Add patch panel", f"{panel} is already used. Choose a different name.")
+                return
+            self.accept()
+            return
+        for row, group in zip(self.rows, self.groups):
+            panel = row["panel"].text().strip()
+            port = row["port"].text().strip()
+            label = "Fiber" if group.get("media") == "fiber" else "Copper"
+            if not panel:
+                QMessageBox.warning(self, "Add patch panel", f"Enter the {label.lower()} panel id.")
+                return
+            if name_taken(panel, self.taken) or name_taken(panel, names):
+                QMessageBox.warning(self, "Add patch panel", f"{panel} is already used. Choose a different name.")
+                return
+            if not port:
+                QMessageBox.warning(self, "Add patch panel", f"Enter the port for {panel}.")
+                return
+            if port_in_use(self.occupied, panel, port):
+                QMessageBox.warning(self, "Add patch panel", f"{panel} port {port} is already used.")
+                return
+            if group.get("media") == "fiber" and not parse_range(row["strands"].text()):
+                QMessageBox.warning(self, "Add patch panel", "Enter the fiber strand numbers, such as 1-2.")
+                return
+            names.append(panel)
+        self.accept()
+
+    def choices(self) -> list[dict]:
+        if not self.groups:
+            return [{"panel_id": self.panel.text().strip(), "media": self.media.currentData(), "associate": False}]
+        chosen = []
+        for row, group in zip(self.rows, self.groups):
+            chosen.append(
+                {
+                    "panel_id": row["panel"].text().strip(),
+                    "media": group.get("media"),
+                    "associate": True,
+                    "a_role": row["a_end"].currentText(),
+                    "z_role": row["z_end"].currentText(),
+                    "port": row["port"].text().strip(),
+                    "strands": row["strands"].text().strip(),
+                }
+            )
+        return chosen
+
+
+class PlacementDialog(QDialog):
+    """Name a new device or cable, and record the association when it lands on existing plant."""
+
+    def __init__(self, title, kind_label, kinds, name_label, suggested_name, taken, context, occupied, parent=None):
+        super().__init__(parent)
+        self.context = context or {}
+        self.occupied = occupied or []
+        self.taken = taken or []
+        self.setWindowTitle(title)
+        self.resize(460, 520)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.kind = QComboBox()
+        for item in kinds:
+            self.kind.addItem(item["label"], item)
+        form.addRow(kind_label, self.kind)
+        self.name = QLineEdit(suggested_name or "")
+        self.name.setPlaceholderText("Required, and it must be unique")
+        form.addRow(name_label, self.name)
+        self.media = QComboBox()
+        self.media.addItem("Copper", "copper")
+        self.media.addItem("Fiber", "fiber")
+        if self.context.get("media") == "fiber":
+            self.media.setCurrentIndex(1)
+        if self.context.get("ask_media"):
+            form.addRow("Media", self.media)
+        layout.addLayout(form)
+
+        self.a_end = QComboBox()
+        self.z_end = QComboBox()
+        self.idf = QComboBox()
+        self.panel = QComboBox()
+        self.panel.setEditable(True)
+        self.port = QLineEdit()
+        self.strands = QLineEdit()
+        self.strands.setPlaceholderText("1-2")
+        self.association = QWidget()
+        association_layout = QVBoxLayout(self.association)
+        association_layout.setContentsMargins(0, 0, 0, 0)
+        summary = self.context.get("summary") or ""
+        if summary:
+            association_layout.addWidget(QLabel(summary))
+        fields = QFormLayout()
+        for box in (self.a_end, self.z_end):
+            box.addItems(["device", "idf"])
+        if self.context.get("device_end") == "z_end":
+            self.a_end.setCurrentText("idf")
+            self.z_end.setCurrentText("device")
+        else:
+            self.a_end.setCurrentText("device")
+            self.z_end.setCurrentText("idf")
+        fields.addRow("A end", self.a_end)
+        fields.addRow("Z end", self.z_end)
+        for item in self.context.get("idfs") or []:
+            self.idf.addItem(feature_id(item) or "", feature_id(item))
+        fields.addRow("IDF", self.idf)
+        fields.addRow("Panel", self.panel)
+        fields.addRow("Port", self.port)
+        fields.addRow("Fiber strands", self.strands)
+        association_layout.addLayout(fields)
+        layout.addWidget(self.association)
+        self.association.setVisible(bool(self.context.get("associate")))
+        self._refill_panels()
+        self.idf.currentIndexChanged.connect(self._refill_panels)
+        self.media.currentIndexChanged.connect(self._media_changed)
+        self._media_changed()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def choices(self) -> dict:
+        kind = self.kind.currentData() or {}
+        return {
+            "layer_id": kind.get("layer_id"),
+            "role": kind.get("role"),
+            "name": self.name.text().strip(),
+            "media": self.media.currentData(),
+            "associate": bool(self.context.get("associate")),
+            "a_role": self.a_end.currentText(),
+            "z_role": self.z_end.currentText(),
+            "idf_id": self.idf.currentData() or self.idf.currentText(),
+            "panel_id": self.panel.currentText().strip(),
+            "port": self.port.text().strip(),
+            "strands": self.strands.text().strip(),
+        }
+
+    def _refill_panels(self) -> None:
+        current = self.panel.currentText().strip()
+        idf_id = self.idf.currentData() or self.idf.currentText()
+        names = (self.context.get("panels_by_idf") or {}).get(idf_id) or []
+        preferred = self.context.get("panel_id") or ""
+        self.panel.blockSignals(True)
+        self.panel.clear()
+        for name in names:
+            self.panel.addItem(name)
+        if current:
+            self.panel.setCurrentText(current)
+        elif preferred:
+            self.panel.setCurrentText(preferred)
+        self.panel.blockSignals(False)
+
+    def _media_changed(self) -> None:
+        show_strands = self.media.currentData() == "fiber" and bool(self.context.get("associate"))
+        self.strands.setVisible(show_strands)
+
+    def _accept(self) -> None:
+        name = self.name.text().strip()
+        if not name:
+            QMessageBox.warning(self, self.windowTitle(), "Enter a name.")
+            return
+        if name_taken(name, self.taken):
+            QMessageBox.warning(self, self.windowTitle(), f"{name} is already used. Choose a different name.")
+            return
+        if self.context.get("associate") and (self.context.get("idfs") or self.context.get("panel_id")):
+            panel = self.panel.currentText().strip()
+            port = self.port.text().strip()
+            if not panel or not port:
+                QMessageBox.warning(self, self.windowTitle(), "Enter the panel and the port.")
+                return
+            if port_in_use(self.occupied, panel, port):
+                QMessageBox.warning(self, self.windowTitle(), f"{panel} port {port} is already used.")
+                return
+            if self.media.currentData() == "fiber" and not parse_range(self.strands.text()):
+                QMessageBox.warning(self, self.windowTitle(), "Enter the fiber strand numbers, such as 1-2.")
+                return
         self.accept()

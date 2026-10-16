@@ -17,9 +17,11 @@ COLUMNS = (
     "IDF",
     "Panel",
     "Port",
-    "Strands",
-    "Warnings",
-)
+        "Strands",
+        "Segments",
+        "Enclosures",
+        "Warnings",
+    )
 
 _MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
@@ -37,6 +39,8 @@ def report_record(report: dict) -> dict:
         "Panel": report.get("panel_id") or "",
         "Port": report.get("panel_port") or "",
         "Strands": " | ".join(report.get("strand_lines") or []),
+        "Segments": " > ".join(report.get("segments") or []),
+        "Enclosures": ", ".join(report.get("enclosures") or []),
         "Warnings": " | ".join(report.get("warnings") or []),
     }
 

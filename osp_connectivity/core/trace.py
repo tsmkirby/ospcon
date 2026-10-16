@@ -64,6 +64,10 @@ def _format_one(report: dict) -> str:
         length = f"  {report['length']}" if report.get("length") else ""
         kind = f"  {report['cable_type']}" if report.get("cable_type") else ""
         lines.append(f"Cable: {report['cable_id']}{kind}{length}")
+    if report.get("segments"):
+        lines.append("Segments: " + " > ".join(report["segments"]))
+    if report.get("enclosures"):
+        lines.append("Enclosures: " + ", ".join(report["enclosures"]))
     if report.get("ducts"):
         lines.append("Ducts: " + " > ".join(report["ducts"]))
     if report.get("idf_id"):
@@ -254,10 +258,7 @@ def _report_from_cable(device, cable, circuit, features, tables, index) -> dict:
     elif text_of(values.get("length_m")):
         length = f"{values.get('length_m')} m"
 
-    cable_ids = []
-    for cable_name in [identifier, *[text_of(row.get("a_cable_id")) for row in rows], *[text_of(row.get("b_cable_id")) for row in rows]]:
-        if cable_name and cable_name.casefold() not in {item.casefold() for item in cable_ids}:
-            cable_ids.append(cable_name)
+    cable_ids, enclosure_ids = linked_fiber(identifier, features, tables, index)
     ducts = []
     for cable_name in cable_ids:
         for label in _duct_labels(cable_name, "", tables.get("routes") or []):
@@ -271,6 +272,10 @@ def _report_from_cable(device, cable, circuit, features, tables, index) -> dict:
             ref = _ref(feature)
             if ref not in highlighted:
                 highlighted.append(ref)
+    for enc_id in enclosure_ids:
+        enc = _find_id(features, enc_id, {"splice_enc"})
+        if enc and _ref(enc) not in enclosure_refs:
+            enclosure_refs.append(_ref(enc))
     highlights = {
         "cables": highlighted or [_ref(cable)],
         "devices": [_ref(device)] if device else [],
@@ -288,9 +293,72 @@ def _report_from_cable(device, cable, circuit, features, tables, index) -> dict:
         "panel_id": panel,
         "panel_port": port,
         "strand_lines": strand_lines,
+        "segments": cable_ids if len(cable_ids) > 1 else [],
+        "enclosures": enclosure_ids,
         "warnings": warnings,
         "highlights": highlights,
     }
+
+
+def linked_fiber(start_id: str, features: list[dict], tables: dict, index: dict) -> tuple[list[str], list[str]]:
+    """Cables and enclosures connected to this segment by splices, membership, or shared ends."""
+    start = text_of(start_id)
+    if not start:
+        return [], []
+    splices = tables.get("splices") or []
+    memberships = tables.get("memberships") or []
+    cables = [feature for feature in features if feature.get("role") == "cable" and feature_id(feature)]
+    segments: list[str] = []
+    enclosures: list[str] = []
+    seen_cables: set[str] = set()
+    seen_enc: set[str] = set()
+    queue = [start]
+
+    def add_enclosure(value) -> None:
+        enc = text_of(value)
+        if enc and enc.casefold() not in seen_enc:
+            seen_enc.add(enc.casefold())
+            enclosures.append(enc)
+            for other in cables:
+                values = other.get("values") or {}
+                ends = {
+                    (text_of(values.get("a_end")) or "").casefold(),
+                    (text_of(values.get("z_end")) or "").casefold(),
+                }
+                if enc.casefold() in ends:
+                    queue.append(feature_id(other))
+            for row in memberships:
+                if (text_of(row.get("splice_enc_id")) or "").casefold() == enc.casefold():
+                    other_id = text_of(row.get("cable_id"))
+                    if other_id:
+                        queue.append(other_id)
+
+    while queue:
+        current = text_of(queue.pop(0))
+        if not current or current.casefold() in seen_cables:
+            continue
+        seen_cables.add(current.casefold())
+        segments.append(current)
+        cable = next((item for item in cables if feature_id(item).casefold() == current.casefold()), None)
+        if cable:
+            values = cable.get("values") or {}
+            for end_name in ("a_end", "z_end"):
+                for hit in resolve_end(index, values.get(end_name), cable):
+                    if hit.get("role") == "splice_enc":
+                        add_enclosure(feature_id(hit))
+        for row in splices:
+            a_cable = text_of(row.get("a_cable_id"))
+            b_cable = text_of(row.get("b_cable_id"))
+            if (a_cable or "").casefold() == current.casefold() and b_cable:
+                queue.append(b_cable)
+                add_enclosure(row.get("splice_enc_id"))
+            elif (b_cable or "").casefold() == current.casefold() and a_cable:
+                queue.append(a_cable)
+                add_enclosure(row.get("splice_enc_id"))
+        for row in memberships:
+            if (text_of(row.get("cable_id")) or "").casefold() == current.casefold():
+                add_enclosure(row.get("splice_enc_id"))
+    return segments, enclosures
 
 
 def _panel_for(values: dict, device_end: str | None, device: dict | None) -> tuple:

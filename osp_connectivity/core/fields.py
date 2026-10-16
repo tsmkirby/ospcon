@@ -93,6 +93,7 @@ _ID_CANDIDATES = {
     "duct": ["segment_id"],
     "ap": ["ap_id", "device_id"],
     "cctv": ["cctv_id", "device_id"],
+    "pos": ["pos_id", "device_id"],
     "idf": ["idf_id", "mdf_idf_id"],
     "structure": ["support_id", "structure_id"],
     "handhole": ["access_id", "structure_id", "structure_name"],
@@ -109,6 +110,7 @@ _VALUE_CANDIDATES = {
         "ap_name",
         "device_name",
         "cctv_name",
+        "pos_name",
         "idf_name",
         "mdf_idf_name",
         "pp_name",
@@ -199,18 +201,37 @@ def next_id(existing: Iterable[str], sample: str) -> str:
 
 
 def enclosure_id(existing: Iterable[str], cable_id: str, template_style: bool) -> str:
-    """Template enclosures use VIB-EN-0001. NCL enclosures follow the cable prefix."""
+    """Template enclosures use VIB-EN-0001. A dotted cable id uses the same venue with .enc."""
     if template_style:
-        venue = "OSP"
-        match = re.match(r"^([A-Za-z]{2,4})-", cable_id or "")
-        if match:
-            venue = match.group(1).upper()
-        return next_id(list(existing) + [f"{venue}-EN-0000"], f"{venue}-EN-0000")
+        return enclosure_id_from_prefix(existing, suggest_enclosure_prefix(cable_id))
     prefix, _width = id_pattern(cable_id or "osp.0000")
-    # vib.fib. -> vib.enc.
     parts = prefix.rstrip(".-").split(".")
     if len(parts) >= 2:
         enc_prefix = parts[0] + ".enc."
     else:
         enc_prefix = prefix + "enc."
     return next_id(list(existing) + [enc_prefix + "0000"], enc_prefix + "0000")
+
+
+def suggest_enclosure_prefix(cable_id: str) -> str:
+    """Venue code a technician can confirm, such as VIB or OSP."""
+    text = text_of(cable_id) or ""
+    match = re.match(r"^([A-Za-z]{2,8})-", text)
+    if match:
+        return match.group(1).upper()
+    dotted = [part for part in text.split(".") if part]
+    if len(dotted) >= 2 and dotted[0].isalpha():
+        return dotted[0].upper()
+    return "OSP"
+
+
+def enclosure_id_from_prefix(existing: Iterable[str], prefix: str) -> str:
+    """Build the next PREFIX-EN-0001 id from the prefix the user typed."""
+    text = (prefix or "").strip().strip("-")
+    if not text:
+        raise ValueError("Enter an enclosure prefix.")
+    if text.upper().endswith("-EN"):
+        sample = f"{text}-0000"
+    else:
+        sample = f"{text}-EN-0000"
+    return next_id(list(existing), sample)

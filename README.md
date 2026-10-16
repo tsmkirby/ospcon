@@ -33,7 +33,7 @@ Copy the folder rather than making a shortcut. QGIS reads the plugin from that d
 
 ## Toolbar
 
-The **OSP Connectivity** toolbar has five actions. Results open in the **OSP Report** dock, which can copy the text, export a spreadsheet, or clear the map highlight.
+The **OSP Connectivity** toolbar has these actions. Results open in the **OSP Report** dock, which can copy the text, export a spreadsheet, or clear the map highlight.
 
 | Action | What it does |
 | --- | --- |
@@ -41,7 +41,10 @@ The **OSP Connectivity** toolbar has five actions. Results open in the **OSP Rep
 | Associate selection | Builds one circuit from the features you have selected, then asks for the panel and port. |
 | Trace selection | Follows the selected device, cable, or IDF and highlights the path. |
 | Add fiber enclosure | Click a fiber cable. The cable is split and you choose which strands are spliced. |
-| Set snap tolerance | Sets the distance used for duct chaining and enclosure clicks. |
+| Add patch panel | Click an IDF. A copper cable gets a copper panel and a fiber cable gets a fiber panel, with the port and ends recorded in the dialog. |
+| Add device | Click the map. Choose the device layer and a unique name. A cable under the click is associated in the same dialog. |
+| Add cable | Draw a line. If it meets a device and an IDF or patch panel, the dialog records that association. |
+| Set snap tolerance | Sets the distance used for duct chaining, enclosure clicks, and panel clicks. |
 
 ### Build associations
 
@@ -54,7 +57,7 @@ It never overwrites a field that already has a value, including placeholders suc
 Select the pieces of one path, then run **Associate selection**. A typical copper selection is an AP, its cable, the duct-bank segments it follows, the pole it is mounted on, and the IDF. The dialog asks for:
 
 - Which end is the device and which end is the IDF. A and Z are labels, not a direction of signal. The dialog follows the pattern already used on that layer.
-- The patch panel and port. When the project has panel layers, the list comes from those layers. Otherwise it lists panel names already used on cables that end at the selected IDF, and you can type a new one.
+- The patch panel and port. The list shows the panels already associated with the IDF selected in the dialog, and it changes when you pick a different IDF. You can type a new panel id. When you do, that panel is created on the selected IDF and linked to it.
 - For fiber, the strand numbers. Ports may be a single number or a range such as `1-2`.
 
 The dialog will not save when no cable is selected, more than one device is selected, more than two IDFs are selected, copper and fiber are mixed, or the chosen port is already occupied.
@@ -71,6 +74,8 @@ Select an AP, camera, jack, cable, IDF, or panel, then run **Trace selection**. 
 - Ducts, in order, joined by `>`
 - IDF
 - Panel and port
+- Associated fiber segments, in connection order
+- Splice enclosures on that path
 - Fiber strands, compressed into ranges, including splice hops
 
 The map highlight uses orange for cables, blue for devices, green for IDFs, and magenta for splice enclosures. Duct banks are named in the report and are not highlighted. If the same cable id exists more than once, every copy is highlighted and the report says so.
@@ -81,7 +86,7 @@ Trace order is the selected device first, then a selected cable, then a selected
 
 **Export** in the OSP Report dock opens a dialog for the current trace. Check the circuits to include and the columns to write. The columns are always:
 
-Device, Pole, Cable, Cable type, Length, Ducts, IDF, Panel, Port, Strands, Warnings
+Device, Pole, Cable, Cable type, Length, Ducts, IDF, Panel, Port, Strands, Segments, Enclosures, Warnings
 
 Create a new `.csv` or `.xlsx` file, or add the checked rows to a file you already have. Adding rows keeps the columns already in that file, including columns you added by hand, and appends any selected column that is not there yet. Trace another circuit later and add it to the same file. The column names do not change, so the sheet can grow into one table.
 
@@ -98,7 +103,27 @@ Choose **Add fiber enclosure**, then click a point on a fiber cable, away from e
 - A click on an endpoint does not split that cable. It is treated as a lateral that ends at the enclosure.
 - Canceling the splice dialog rolls the split back.
 
-Lengths are recalculated only when the layer’s map units are meters.
+The two pieces of a split cable are linked to each other and to the enclosure. Tracing either segment lists the associated segments and the enclosure, and highlights them. The enclosure dialog asks for a prefix such as `VIB` or `OSP`, and the new id is the next `PREFIX-EN-` number. Lengths are recalculated only when the layer’s map units are meters.
+
+### Add device
+
+Choose **Add device** and click the map. The device type list is the point layers in the project that hold devices, such as AP, CCTV, and POS. The name has to be unique.
+
+If the click is on a cable, the dialog also asks for the cable ends, the IDF, and the panel and port. A panel name that is not already a feature is created on that IDF.
+
+### Add cable
+
+Choose **Add cable**. Left-click the path and right-click, or press Enter, to finish. Pick the cable layer and a unique cable id.
+
+If the line meets one device and an IDF or a patch panel, the dialog records the ends, panel, and port the same way **Associate selection** does. When the IDF has no panel yet, the name you type is created on that IDF.
+
+### Add patch panel
+
+Choose **Add patch panel**, then click an IDF. Enter a panel id that is not already used.
+
+A copper cable under the click is tied to a copper panel. A fiber cable is tied to a fiber panel, and the dialog asks for the strand numbers. When both cross the same point, the dialog asks for each one. The panel is created on the matching panel layer. The dialog also asks for the cable ends and the port, the same way **Associate selection** does, and a device that sits on that cable is linked. A value that is already filled in is left as it is.
+
+If no cable crosses the point, choose copper or fiber and the panel is still created on the IDF.
 
 ## Where the links are stored
 

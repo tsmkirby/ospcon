@@ -8,6 +8,7 @@ ASSET_ROLES = {
     "ap",
     "cctv",
     "data_jack",
+    "pos",
     "idf",
     "patch_panel",
     "fdp",
@@ -16,7 +17,7 @@ ASSET_ROLES = {
     "splice_enc",
     "building",
 }
-DEVICE_ROLES = {"ap", "cctv", "data_jack"}
+DEVICE_ROLES = {"ap", "cctv", "data_jack", "pos"}
 
 
 def feature_id(feature: dict):
