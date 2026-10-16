@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -16,6 +18,7 @@ from qgis.PyQt.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -30,6 +33,14 @@ from .core.export import COLUMNS, item_label
 from .core.fields import parse_count, parse_range
 from .core.place import name_taken
 from .core.strands import build_splice_rows, compress_splices, validate_edits
+from .core.switches import (
+    new_patch,
+    open_panel_ports,
+    open_switch_ports,
+    panels_for_idf,
+    patch_line,
+    switches_for_idf,
+)
 
 
 class AssociateDialog(QDialog):
@@ -819,4 +830,312 @@ class PlacementDialog(QDialog):
             if self.media.currentData() == "fiber" and not parse_range(self.strands.text()):
                 QMessageBox.warning(self, self.windowTitle(), "Enter the fiber strand numbers, such as 1-2.")
                 return
+        self.accept()
+
+
+class PortCountDialog(QDialog):
+    """Ask how many ports a new patch panel has before it is created."""
+
+    def __init__(self, panel_id: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Patch panel ports")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"How many ports does {panel_id} have?"))
+        self.count = QSpinBox()
+        self.count.setRange(1, 864)
+        self.count.setValue(24)
+        layout.addWidget(self.count)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def port_count(self) -> int:
+        return int(self.count.value())
+
+
+class ChooseAssetDialog(QDialog):
+    """Pick one panel or switch that belongs to the IDF just clicked."""
+
+    def __init__(self, title: str, prompt: str, choices: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(420, 140)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(prompt))
+        self.choice = QComboBox()
+        for label, payload in choices:
+            self.choice.addItem(label, payload)
+        layout.addWidget(self.choice)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected(self):
+        return self.choice.currentData()
+
+
+class PanelViewDialog(QDialog):
+    """A grid of one panel's ports. Occupied ports open the device and cable."""
+
+    def __init__(self, inventory: dict, parent=None):
+        super().__init__(parent)
+        panel_id = inventory.get("title") or inventory.get("panel_id") or "Patch panel"
+        self.setWindowTitle(str(panel_id))
+        self.resize(720, 520)
+        layout = QVBoxLayout(self)
+        idf = inventory.get("idf_id") or "not linked to an IDF"
+        count = inventory.get("count") or 0
+        used = sum(1 for port in inventory.get("ports") or [] if port.get("occupied"))
+        layout.addWidget(QLabel(f"{panel_id}\nIDF: {idf}\n{used} of {count} ports occupied"))
+        legend = QLabel(inventory.get("legend") or "Blue ports are occupied. Click one to see the device and cable.")
+        legend.setWordWrap(True)
+        layout.addWidget(legend)
+
+        grid = QGridLayout()
+        grid.setSpacing(4)
+        columns = 8 if any(len(str(port.get("label") or "")) > 4 for port in inventory.get("ports") or []) else 12
+        for index, port in enumerate(inventory.get("ports") or []):
+            label = str(port.get("label") or port.get("number") or "")
+            button = QPushButton(label)
+            button.setFixedHeight(28)
+            button.setMinimumWidth(44 if len(label) <= 3 else 78)
+            if port.get("occupied"):
+                button.setStyleSheet("QPushButton { background: #145ad2; color: white; border: 1px solid #0e3f96; }")
+            else:
+                button.setStyleSheet("QPushButton { background: #f4f1ea; color: #333; border: 1px solid #c8c2b4; }")
+            button.clicked.connect(lambda _checked=False, item=port: self._show(item))
+            row, column = divmod(index, columns)
+            grid.addWidget(button, row, column)
+        holder = QWidget()
+        holder.setLayout(grid)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(holder)
+        layout.addWidget(scroll, 1)
+        self.detail = QLabel("Select a port.")
+        self.detail.setWordWrap(True)
+        self.detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.detail)
+        close = QDialogButtonBox(QDialogButtonBox.Close)
+        close.rejected.connect(self.reject)
+        layout.addWidget(close)
+
+    def _show(self, port: dict) -> None:
+        self.detail.setText(port.get("detail") or f"Port {port.get('number')} is open.")
+
+
+class SwitchDialog(QDialog):
+    """Attributes for a switch placed on an IDF."""
+
+    def __init__(self, suggested_id: str, taken: list, parent=None):
+        super().__init__(parent)
+        self.taken = taken
+        self.setWindowTitle("Add switch")
+        self.resize(420, 420)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.identifier = QLineEdit(suggested_id)
+        form.addRow("Switch id", self.identifier)
+        self.name = QLineEdit(suggested_id)
+        form.addRow("Name", self.name)
+        self.count = QSpinBox()
+        self.count.setRange(1, 512)
+        self.count.setValue(24)
+        form.addRow("Port count", self.count)
+        self.make = QLineEdit()
+        form.addRow("Make", self.make)
+        self.model = QLineEdit()
+        form.addRow("Model", self.model)
+        self.rack = QLineEdit()
+        form.addRow("Rack number", self.rack)
+        self.ru = QLineEdit()
+        form.addRow("RU number", self.ru)
+        self.first_port = QLineEdit("gi1/0/1")
+        form.addRow("First switch port", self.first_port)
+        layout.addLayout(form)
+        note = QLabel("Ports are numbered from the first id, such as gi1/0/1, gi1/0/2, gi1/0/3.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _accept(self) -> None:
+        identifier = self.identifier.text().strip()
+        if not identifier:
+            QMessageBox.warning(self, "Add switch", "Enter a switch id, such as VIB-SW-0001.")
+            return
+        if identifier.casefold() in {item.casefold() for item in self.taken}:
+            QMessageBox.warning(self, "Add switch", f"{identifier} already exists.")
+            return
+        if not self.name.text().strip():
+            QMessageBox.warning(self, "Add switch", "Enter a switch name.")
+            return
+        self.accept()
+
+    def choices(self) -> dict:
+        return {
+            "sw_id": self.identifier.text().strip(),
+            "sw_name": self.name.text().strip(),
+            "sw_port_count": int(self.count.value()),
+            "make": self.make.text().strip(),
+            "model": self.model.text().strip(),
+            "rack_number": self.rack.text().strip(),
+            "ru_number": self.ru.text().strip(),
+            "first_port": self.first_port.text().strip() or "gi1/0/1",
+        }
+
+
+class PatchDialog(QDialog):
+    """See the patches at an IDF and add a cross connect from a panel port to a switch port."""
+
+    def __init__(self, idfs: list, features: list, tables: dict, parent=None):
+        super().__init__(parent)
+        self.idfs = idfs
+        self.features = features
+        self.tables = tables
+        self.pending = []
+        self.setWindowTitle("Patching")
+        self.resize(640, 560)
+        layout = QVBoxLayout(self)
+        self.existing = QListWidget()
+        layout.addWidget(QLabel("Patches at this IDF"))
+        layout.addWidget(self.existing)
+        form = QFormLayout()
+        self.idf = QComboBox()
+        for item in idfs:
+            self.idf.addItem(feature_id(item) or "", feature_id(item))
+        form.addRow("IDF", self.idf)
+        self.media = QComboBox()
+        self.media.addItem("Copper", "copper")
+        self.media.addItem("Fiber", "fiber")
+        form.addRow("Patch type", self.media)
+        self.single = QCheckBox("Single fiber circuit")
+        form.addRow("", self.single)
+        self.panel = QComboBox()
+        form.addRow("Patch panel", self.panel)
+        self.port = QComboBox()
+        form.addRow("Open port", self.port)
+        self.switch = QComboBox()
+        form.addRow("Switch", self.switch)
+        self.switch_port = QComboBox()
+        form.addRow("Switch port", self.switch_port)
+        layout.addLayout(form)
+        add = QPushButton("Add patch")
+        add.clicked.connect(self._add)
+        layout.addWidget(add)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Save")
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.idf.currentIndexChanged.connect(self._refill)
+        self.media.currentIndexChanged.connect(self._refill)
+        self.single.toggled.connect(self._refill_ports)
+        self.panel.currentIndexChanged.connect(self._refill_ports)
+        self.switch.currentIndexChanged.connect(self._refill_switch_ports)
+        self._refill()
+
+    def patches(self) -> list[dict]:
+        return list(self.pending)
+
+    def _idf_id(self) -> str:
+        return self.idf.currentData() or ""
+
+    def _all_patches(self) -> list[dict]:
+        return list(self.tables.get("patches") or []) + self.pending
+
+    def _refill(self, *_args) -> None:
+        idf_id = self._idf_id()
+        fiber = self.media.currentData() == "fiber"
+        self.single.setVisible(fiber)
+        if not fiber:
+            self.single.setChecked(False)
+        self.existing.clear()
+        for row in list(self.tables.get("patches") or []) + self.pending:
+            if (row.get("mdf_idf_id") or "").casefold() == (idf_id or "").casefold():
+                self.existing.addItem(patch_line(row))
+        current_panel = self.panel.currentData()
+        self.panel.blockSignals(True)
+        self.panel.clear()
+        for feature in panels_for_idf(idf_id, self.features, "fiber" if fiber else "copper"):
+            self.panel.addItem(feature_id(feature) or "", feature)
+        if current_panel is not None:
+            for index in range(self.panel.count()):
+                if feature_id(self.panel.itemData(index) or {}) == feature_id(current_panel):
+                    self.panel.setCurrentIndex(index)
+                    break
+        self.panel.blockSignals(False)
+        current_switch = self.switch.currentData()
+        self.switch.blockSignals(True)
+        self.switch.clear()
+        for row in switches_for_idf(idf_id, self.tables.get("switches") or []):
+            label = row.get("sw_name") or row.get("sw_id")
+            self.switch.addItem(str(label), row)
+        if current_switch:
+            wanted = (current_switch.get("sw_id") or "").casefold()
+            for index in range(self.switch.count()):
+                data = self.switch.itemData(index) or {}
+                if (data.get("sw_id") or "").casefold() == wanted:
+                    self.switch.setCurrentIndex(index)
+                    break
+        self.switch.blockSignals(False)
+        self._refill_ports()
+        self._refill_switch_ports()
+
+    def _refill_ports(self, *_args) -> None:
+        panel = self.panel.currentData()
+        tables = dict(self.tables)
+        tables["patches"] = self._all_patches()
+        self.port.clear()
+        if not panel:
+            return
+        for choice in open_panel_ports(
+            panel,
+            self.features,
+            tables,
+            self.media.currentData() or "copper",
+            self.single.isChecked(),
+        ):
+            self.port.addItem(choice)
+
+    def _refill_switch_ports(self, *_args) -> None:
+        row = self.switch.currentData() or {}
+        self.switch_port.clear()
+        ports = open_switch_ports(row.get("sw_id") or "", self.tables.get("switch_ports") or [], self._all_patches())
+        for port in ports:
+            label = port.get("switch_port_name") or port.get("switch_port_id")
+            self.switch_port.addItem(str(label), port)
+
+    def _add(self) -> bool:
+        panel = self.panel.currentData()
+        switch = self.switch.currentData() or {}
+        switch_port = self.switch_port.currentData() or {}
+        if not self._idf_id() or not panel or not self.port.currentText() or not switch or not switch_port:
+            QMessageBox.warning(self, "Patching", "Choose an IDF, panel, open port, switch, and switch port.")
+            return False
+        try:
+            row = new_patch(
+                {
+                    "idf_id": self._idf_id(),
+                    "media": self.media.currentData(),
+                    "single_fiber": self.single.isChecked(),
+                    "panel_id": feature_id(panel),
+                    "panel_port": self.port.currentText(),
+                    "sw_id": switch.get("sw_id"),
+                    "switch_port_id": switch_port.get("switch_port_id"),
+                    "switch_port_name": switch_port.get("switch_port_name"),
+                }
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Patching", str(exc))
+            return False
+        self.pending.append(row)
+        self._refill()
+        return True
+
+    def _accept(self) -> None:
         self.accept()

@@ -32,6 +32,9 @@ TABLE_ROLES = {
     "mounted_device",
     "splice_enc_cable",
     "circuit",
+    "switch",
+    "switch_port",
+    "cross_connect",
 }
 
 GRAPH_ROLES = (
@@ -135,6 +138,9 @@ def read_tables(layers: dict, infos: list) -> dict:
         "mounts": [],
         "memberships": [],
         "handholes": [],
+        "switches": [],
+        "switch_ports": [],
+        "patches": [],
     }
     role_to_bucket = {
         "circuit": "circuits",
@@ -146,6 +152,9 @@ def read_tables(layers: dict, infos: list) -> dict:
         "copper_termination": "terminations",
         "mounted_device": "mounts",
         "splice_enc_cable": "memberships",
+        "switch": "switches",
+        "switch_port": "switch_ports",
+        "cross_connect": "patches",
     }
     for info in infos:
         bucket = role_to_bucket.get(info.role)
@@ -156,7 +165,7 @@ def read_tables(layers: dict, infos: list) -> dict:
             continue
         for qgs_feature in layer.getFeatures():
             row = {field.name(): plain(qgs_feature[field.name()]) for field in layer.fields()}
-            if bucket in ("handholes", "circuits", "splices", "memberships"):
+            if bucket in ("handholes", "circuits", "splices", "memberships", "switches", "switch_ports", "patches"):
                 row["_fid"] = qgs_feature.id()
                 row["_layer_id"] = info.layer_id
             tables[bucket].append(row)
@@ -428,6 +437,7 @@ def ensure_panel_layer(project: QgsProject, layers: dict, infos: list, fiber: bo
             QgsField("fdp_name", QVariant.String),
             QgsField("status", QVariant.String),
             QgsField("mdf_idf_id", QVariant.String),
+            QgsField("port_count", QVariant.Int),
             QgsField("media_type", QVariant.String),
         ]
     else:
@@ -437,6 +447,7 @@ def ensure_panel_layer(project: QgsProject, layers: dict, infos: list, fiber: bo
             QgsField("pp_name", QVariant.String),
             QgsField("status", QVariant.String),
             QgsField("mdf_idf_id", QVariant.String),
+            QgsField("port_count", QVariant.Int),
             QgsField("media_type", QVariant.String),
         ]
     _write_layer(project, target, layer_name, title, "Point", fields)
@@ -491,9 +502,20 @@ def ensure_id_field(layer, role: str) -> None:
     layer.updateFields()
 
 
-def add_panel_feature(session, project, layer, info, point, panel_id: str, idf_id: str, media: str) -> None:
+def ensure_port_count_field(layer) -> None:
+    """Give a panel layer somewhere to store how many ports it has."""
+    names = {field.name().casefold() for field in layer.fields()}
+    if "port_count" in names or "position_count" in names:
+        return
+    if not layer.dataProvider().addAttributes([QgsField("port_count", QVariant.Int)]):
+        raise RuntimeError(f"Could not add port_count on {layer.name()}.")
+    layer.updateFields()
+
+
+def add_panel_feature(session, project, layer, info, point, panel_id: str, idf_id: str, media: str, port_count: int = 0) -> None:
     if point is None:
         raise RuntimeError(f"{idf_id} has no location, so the patch panel was not created.")
+    ensure_port_count_field(layer)
     session.edit(layer)
     created = QgsFeature(layer.fields())
     if layer.geometryType() != QgsWkbTypes.NullGeometry:
@@ -501,6 +523,9 @@ def add_panel_feature(session, project, layer, info, point, panel_id: str, idf_i
     _set_field(created, info, "id", panel_id)
     _set_field(created, info, "name", panel_id)
     _set_field(created, info, "idf_ref", idf_id)
+    _set_named(created, ["mdf_idf_id", "idf_id", "idf_ref"], idf_id)
+    _set_field(created, info, "port_count", int(port_count) if port_count else None)
+    _set_named(created, ["port_count", "position_count"], int(port_count) if port_count else None)
     _set_field(created, info, "status", "proposed")
     _set_field(created, info, "media", "fiber" if media == "fiber" else "copper")
     if not layer.addFeature(created):
@@ -657,6 +682,35 @@ def _layer_specs(project: QgsProject):
         text("cable_layer_id"),
         text("cable_id"),
     ]
+    switch_fields = [
+        text("sw_id"),
+        text("sw_name"),
+        integer("sw_port_count"),
+        text("make"),
+        text("model"),
+        text("rack_number"),
+        text("ru_number"),
+        text("mdf_idf_id"),
+        text("status"),
+    ]
+    switch_port_fields = [
+        text("switch_port_id"),
+        text("switch_port_name"),
+        text("sw_id"),
+        text("status"),
+    ]
+    patch_fields = [
+        text("patch_id"),
+        text("mdf_idf_id"),
+        text("media_type"),
+        text("panel_id"),
+        text("panel_port"),
+        integer("single_fiber"),
+        text("sw_id"),
+        text("switch_port_id"),
+        text("switch_port_name"),
+        text("status"),
+    ]
     return {
         "fiber_strand": ("osp_fiber_strands", "OSP Fiber Strands", "None", strand_fields),
         "fiber_splice": ("osp_fiber_splices", "OSP Fiber Splices", "None", splice_fields),
@@ -665,6 +719,9 @@ def _layer_specs(project: QgsProject):
         "circuit": ("osp_circuits", "OSP Circuits", "None", circuit_fields),
         "splice_enc": ("osp_splice_enc", "OSP Splice Enclosures", "Point", enclosure_fields),
         "splice_enc_cable": ("osp_splice_enc_cables", "OSP Enclosure Cables", "None", membership_fields),
+        "switch": ("osp_switches", "OSP Switches", "None", switch_fields),
+        "switch_port": ("osp_switch_ports", "OSP Switch Ports", "None", switch_port_fields),
+        "cross_connect": ("osp_cross_connects", "OSP Cross Connects", "None", patch_fields),
     }
 
 
@@ -712,6 +769,99 @@ def _register_strand_relation(project, store, infos) -> None:
     relation.addFieldPair("cable_id", "cable_id")
     if relation.isValid() and not project.relationManager().relation(relation.id()).isValid():
         project.relationManager().addRelation(relation)
+
+
+def ensure_switch_tables(project: QgsProject, layers: dict, infos: list):
+    """Create the switch, switch-port, and cross-connect tables when the project has none."""
+    sidecar = _sidecar_path(project)
+    present = {info.role for info in infos}
+    needed = [role for role in ("switch", "switch_port", "cross_connect") if role not in present]
+    if needed:
+        if not sidecar:
+            raise RuntimeError("Save the QGIS project before adding a switch.")
+        specs = _layer_specs(project)
+        for role in needed:
+            layer_name, title, wkb, fields = specs[role]
+            _write_layer(project, sidecar, layer_name, title, wkb, fields)
+        layers, infos = scan(project)
+    store = {}
+    for info in infos:
+        if info.role in ("switch", "switch_port", "cross_connect"):
+            store.setdefault(info.role, layers[info.layer_id])
+    _register_switch_relations(project, store, infos)
+    return layers, infos, store
+
+
+def add_table_row(session, layer, values: dict) -> None:
+    """Insert one row in a table that has no geometry."""
+    session.edit(layer)
+    created = QgsFeature(layer.fields())
+    for name, value in values.items():
+        if value is None:
+            continue
+        index = created.fields().indexFromName(name)
+        if index >= 0:
+            created.setAttribute(index, value)
+    if not layer.addFeature(created):
+        raise RuntimeError(f"Could not add a row on {layer.name()}.")
+
+
+def _register_switch_relations(project, store, infos) -> None:
+    switches = store.get("switch")
+    ports = store.get("switch_port")
+    patches = store.get("cross_connect")
+    if switches is not None and ports is not None:
+        _add_relation(project, "osp_switch_ports", "Switch Ports", ports, switches, "sw_id", "sw_id")
+    if switches is not None and patches is not None:
+        _add_relation(project, "osp_switch_patches", "Switch Patches", patches, switches, "sw_id", "sw_id")
+    if ports is not None and patches is not None:
+        _add_relation(
+            project,
+            "osp_patch_switch_ports",
+            "Patch Switch Ports",
+            patches,
+            ports,
+            "switch_port_id",
+            "switch_port_id",
+        )
+    idfs = [info for info in infos if info.role == "idf" and "idf_ref" in info.field_map]
+    if switches is not None and len(idfs) == 1:
+        _add_relation(
+            project,
+            "osp_idf_switches",
+            "IDF Switches",
+            switches,
+            project.mapLayer(idfs[0].layer_id),
+            "mdf_idf_id",
+            idfs[0].field_map["idf_ref"],
+        )
+
+
+def _add_relation(project, relation_id, name, referencing, referenced, referencing_field, referenced_field) -> None:
+    if referencing is None or referenced is None:
+        return
+    if referencing.fields().indexFromName(referencing_field) < 0:
+        return
+    if referenced.fields().indexFromName(referenced_field) < 0:
+        return
+    relation = QgsRelation()
+    relation.setId(relation_id)
+    relation.setName(name)
+    relation.setReferencingLayer(referencing.id())
+    relation.setReferencedLayer(referenced.id())
+    relation.addFieldPair(referencing_field, referenced_field)
+    if relation.isValid() and not project.relationManager().relation(relation.id()).isValid():
+        project.relationManager().addRelation(relation)
+
+
+def _set_named(feature, names: list, value) -> None:
+    if value is None:
+        return
+    for name in names:
+        index = feature.fields().indexFromName(name)
+        if index >= 0:
+            feature.setAttribute(index, value)
+            return
 
 
 def _set_field(feature, info, canonical, value) -> None:

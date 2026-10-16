@@ -23,6 +23,12 @@ def classify(geometry_type: str, field_names: Iterable[str]) -> Optional[str]:
     geometry = geometry_type or "None"
 
     if geometry in ("None", "Unknown", "NoGeometry"):
+        if "switch_port_id" in names and "panel_port" in names:
+            return "cross_connect"
+        if "switch_port_id" in names and "sw_id" in names:
+            return "switch_port"
+        if "sw_id" in names:
+            return "switch"
         if "a_strand_no" in names and "b_strand_no" in names:
             return "fiber_splice"
         if "strand_no" in names and "fdp_id" in names:

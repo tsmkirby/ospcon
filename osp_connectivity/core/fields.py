@@ -94,12 +94,15 @@ _ID_CANDIDATES = {
     "ap": ["ap_id", "device_id"],
     "cctv": ["cctv_id", "device_id"],
     "pos": ["pos_id", "device_id"],
-    "idf": ["idf_id", "mdf_idf_id"],
+    "idf": ["idf_id", "mdf_idf_id", "mdf_idf_name", "idf_name"],
     "structure": ["support_id", "structure_id"],
     "handhole": ["access_id", "structure_id", "structure_name", "access_name"],
     "patch_panel": ["pp_id"],
     "fdp": ["fdp_id"],
     "splice_enc": ["splice_enc_id"],
+    "switch": ["sw_id"],
+    "switch_port": ["switch_port_id"],
+    "cross_connect": ["patch_id"],
     "data_jack": ["jack_id"],
     "building": ["building_id"],
 }
@@ -117,6 +120,8 @@ _VALUE_CANDIDATES = {
         "fdp_name",
         "splice_enc_name",
         "access_name",
+        "sw_name",
+        "switch_port_name",
         "Name",
         "name",
     ],
@@ -142,7 +147,8 @@ _VALUE_CANDIDATES = {
     "status": ["status"],
     "structure_type": ["structure_type", "support_type", "location_type"],
     "venue": ["venue_code"],
-    "idf_ref": ["mdf_idf_id"],
+    "idf_ref": ["mdf_idf_id", "idf_id", "idf_ref"],
+    "port_count": ["port_count", "position_count", "sw_port_count"],
 }
 
 

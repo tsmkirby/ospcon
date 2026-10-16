@@ -8,10 +8,21 @@ from osp_connectivity.core.catalog import build_index, end_convention
 from osp_connectivity.core.fields import enclosure_id, enclosure_id_from_prefix, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix
 from osp_connectivity.core.geometry import chain_segments, ducts_along_cable, split_linestring
 from osp_connectivity.core.link import plan_links
-from osp_connectivity.core.panels import cable_idf_edits, panels_for, suggest_panel_id
+from osp_connectivity.core.panels import cable_idf_edits, panel_ports, panels_for, suggest_panel_id
 from osp_connectivity.core.place import device_layer_choices, name_taken, panel_click_edits, panel_media_groups, placement_edits
 from osp_connectivity.core.roles import classify
 from osp_connectivity.core.strands import build_splice_rows, compress_splices, validate_edits
+from osp_connectivity.core.switches import (
+    choice_label,
+    expand_switch_ports,
+    new_patch,
+    open_panel_ports,
+    open_switch_ports,
+    panels_on_idf,
+    suggest_switch_id,
+    switch_inventory,
+    switches_for_idf,
+)
 from osp_connectivity.core.trace import format_report, trace_selection
 
 
@@ -53,6 +64,9 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(classify("None", ["a_cable_id", "a_strand_no", "b_cable_id", "b_strand_no"]), "fiber_splice")
         self.assertEqual(classify("None", ["cable_id", "segment_id", "route_order"]), "cable_route")
         self.assertEqual(classify("None", ["cable_id", "handhole_id", "route_order"]), "cable_handhole")
+        self.assertEqual(classify("None", ["sw_id", "sw_port_count", "mdf_idf_id"]), "switch")
+        self.assertEqual(classify("None", ["switch_port_id", "switch_port_name", "sw_id"]), "switch_port")
+        self.assertEqual(classify("None", ["patch_id", "panel_port", "switch_port_id", "sw_id"]), "cross_connect")
 
         self.assertEqual(classify("Line", ["cable_id", "a_end_location", "z_end_location", "strand_count"]), "cable")
         self.assertEqual(classify("Line", ["segment_id", "conduit_capacity"]), "duct")
@@ -491,6 +505,21 @@ class AssociateAndTraceTests(unittest.TestCase):
         )
         features = [idf_a, idf_b, panel_a, panel_b, cable]
         self.assertEqual(panels_for(["IDF-1"], features, build_index(features)), ["PP-1"])
+        panel_a["values"]["port_count"] = 4
+        viewed = panel_ports(
+            panel_a,
+            [
+                panel_a,
+                feature("ap", 9, "AP-1", {"panel": "PP-1", "port": "2", "cable_ref": "CB-1"}, geometry="Point", coords=[(1, 0)]),
+                feature("cable", 5, "CB-1", {"a_end": "AP-1", "z_panel": "PP-1", "z_port": "1-2"}, coords=[(0, 0), (1, 0)]),
+            ],
+            {},
+        )
+        self.assertEqual(viewed["count"], 4)
+        self.assertEqual(viewed["idf_id"], "IDF-1")
+        self.assertEqual([port["occupied"] for port in viewed["ports"]], [True, True, False, False])
+        self.assertEqual(viewed["ports"][1]["device_id"], "AP-1")
+        self.assertEqual(viewed["ports"][1]["cable_id"], "CB-1")
         self.assertEqual(panels_for(["IDF-2"], features, build_index(features)), ["PP-2"])
         proposal = propose([cable, idf_a], features, 1)
         self.assertEqual(proposal.panels_by_idf["IDF-1"], ["PP-1"])
@@ -507,6 +536,60 @@ class AssociateAndTraceTests(unittest.TestCase):
         self.assertEqual(created["new_panel"]["panel_id"], "PP-9")
         self.assertEqual(created["new_panel"]["idf_id"], "IDF-1")
         self.assertEqual((created["new_panel"]["x"], created["new_panel"]["y"]), (0, 0))
+
+    def test_fiber_patches_use_odd_pairs_and_free_switch_ports(self):
+        self.assertEqual(suggest_switch_id([], "VIB-IDF-0002"), "VIB-SW-0001")
+        self.assertEqual(suggest_switch_id(["VIB-SW-0001"], "VIB-IDF-0002"), "VIB-SW-0002")
+        ports = expand_switch_ports(3, "gi1/0/1")
+        self.assertEqual([item["switch_port_id"] for item in ports], ["gi1/0/1", "gi1/0/2", "gi1/0/3"])
+        panel = feature(
+            "fdp",
+            1,
+            "FD-1",
+            {"idf_ref": "IDF-1", "port_count": 6},
+            geometry="Point",
+            coords=[(0, 0)],
+            layer_id="fdp",
+        )
+        tables = {
+            "patches": [{"panel_id": "FD-1", "panel_port": "1-2", "sw_id": "VIB-SW-0001", "switch_port_id": "gi1/0/1", "mdf_idf_id": "IDF-1"}],
+            "switches": [{"sw_id": "VIB-SW-0001", "mdf_idf_id": "IDF-1"}, {"sw_id": "OSP-SW-0001", "mdf_idf_id": "IDF-9"}],
+            "switch_ports": [
+                {"sw_id": "VIB-SW-0001", "switch_port_id": "gi1/0/1", "switch_port_name": "gi1/0/1"},
+                {"sw_id": "VIB-SW-0001", "switch_port_id": "gi1/0/2", "switch_port_name": "gi1/0/2"},
+            ],
+        }
+        self.assertEqual(open_panel_ports(panel, [panel], tables, "fiber", False), ["3-4", "5-6"])
+        self.assertEqual(open_panel_ports(panel, [panel], tables, "fiber", True), ["3", "4", "5", "6"])
+        self.assertEqual([row["sw_id"] for row in switches_for_idf("IDF-1", tables["switches"])], ["VIB-SW-0001"])
+        free = open_switch_ports("VIB-SW-0001", tables["switch_ports"], tables["patches"])
+        self.assertEqual([row["switch_port_id"] for row in free], ["gi1/0/2"])
+        created = new_patch(
+            {
+                "idf_id": "IDF-1",
+                "media": "fiber",
+                "panel_id": "FD-1",
+                "panel_port": "3-4",
+                "sw_id": "VIB-SW-0001",
+                "switch_port_id": "gi1/0/2",
+                "switch_port_name": "gi1/0/2",
+            }
+        )
+        self.assertEqual(created["single_fiber"], 0)
+        self.assertEqual(created["media_type"], "fiber")
+        self.assertEqual(choice_label("PP-1", "Lobby"), "PP-1 Lobby")
+        self.assertEqual(choice_label("PP-1", "PP-1"), "PP-1")
+        copper = feature("patch_panel", 2, "PP-1", {"idf_ref": "IDF-1", "name": "Lobby"}, geometry="Point", coords=[(0, 0)])
+        self.assertEqual([item["id"] for item in panels_on_idf("IDF-1", [panel, copper])], ["PP-1", "FD-1"])
+        viewed = switch_inventory(
+            {"sw_id": "VIB-SW-0001", "sw_name": "Core", "sw_port_count": 2, "mdf_idf_id": "IDF-1"},
+            tables["switch_ports"],
+            tables["patches"],
+        )
+        self.assertEqual(viewed["title"], "VIB-SW-0001 Core")
+        self.assertEqual(viewed["ports"][0]["occupied"], True)
+        self.assertEqual(viewed["ports"][0]["panel_id"], "FD-1")
+        self.assertEqual(viewed["ports"][1]["occupied"], False)
 
     def test_click_at_an_idf_labels_the_near_cable_end(self):
         cable = feature(

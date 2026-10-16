@@ -26,18 +26,21 @@ from qgis.core import (
     QgsPointXY,
     QgsProject,
     QgsSettings,
+    QgsSnappingConfig,
     QgsUnitTypes,
     QgsWkbTypes,
     Qgis,
     QgsMessageLog,
 )
-from qgis.gui import QgsMapTool, QgsRubberBand
+from qgis.gui import QgsMapCanvasTracer, QgsMapTool, QgsMapToolCapture, QgsRubberBand
 
 from .bridge import (
     EditSession,
     add_enclosure_point,
     add_mapped_feature,
     add_panel_feature,
+    add_table_row,
+    ensure_switch_tables,
     apply_edits,
     apply_inserts,
     apply_plain_edits,
@@ -57,10 +60,10 @@ from .core.cards import write_circuit_cards
 from .core.catalog import feature_id
 from .core.enclosures import enclosure_association, enclosure_edits, enclosure_end_links
 from .core.export import export_reports
-from .core.fields import enclosure_id_from_prefix, media_of, next_id, parse_count, suggest_enclosure_prefix, text_of
+from .core.fields import enclosure_id_from_prefix, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix, text_of
 from .core.geometry import distance, split_linestring
 from .core.link import RowInsert, plan_links
-from .core.panels import panel_feature_ids, suggest_panel_id
+from .core.panels import panel_feature_ids, panel_ports, suggest_panel_id
 from .core.place import (
     cable_layer_choices,
     device_layer_choices,
@@ -77,34 +80,48 @@ from .core.place import (
     taken_device_names,
 )
 from .core.strands import build_splice_rows
+from .core.switches import choice_label, expand_switch_ports, panels_on_idf, suggest_switch_id, switch_inventory, switches_for_idf
 from .core.trace import format_report, trace_selection
 from .dialogs import (
     AssociateDialog,
     CircuitCardDialog,
     ExportDialog,
     ModifyDialog,
+    ChooseAssetDialog,
+    PanelViewDialog,
+    PatchDialog,
     PatchPanelDialog,
     PlacementDialog,
+    PortCountDialog,
     SpliceDialog,
+    SwitchDialog,
 )
 from .mapimage import render_circuit_jpegs
 
 
-class SketchTool(QgsMapTool):
-    """Left-click adds a vertex. Right-click or Enter finishes the line."""
+class SketchTool(QgsMapToolCapture):
+    """Draw a cable with the same snapping and tracing as the line tool."""
 
-    def __init__(self, canvas, finished):
-        super().__init__(canvas)
+    def __init__(self, canvas, cad_dock, finished):
+        super().__init__(canvas, cad_dock, QgsMapToolCapture.CaptureLine)
         self.finished = finished
-        self.points = []
-        self.band = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
-        self.band.setColor(QColor(230, 120, 20))
-        self.band.setWidth(2)
+        self._saved_snap = None
+        self._tracing_action = None
+        self.setAutoSnapEnabled(True)
 
-    def canvasReleaseEvent(self, event):
+    def activate(self):
+        super().activate()
+        self._arm_snapping()
+
+    def deactivate(self):
+        self._restore_snapping()
+        if self.isCapturing():
+            self.stopCapturing()
+        super().deactivate()
+
+    def cadCanvasReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.points.append(self.toMapCoordinates(event.pos()))
-            self._redraw()
+            self.addVertex(event.mapPoint(), event.mapPointMatch())
         elif event.button() == Qt.RightButton:
             self._finish()
 
@@ -112,29 +129,56 @@ class SketchTool(QgsMapTool):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             self._finish()
         elif event.key() == Qt.Key_Escape:
-            self._clear()
+            self.stopCapturing()
+        elif event.key() in (Qt.Key_Backspace, Qt.Key_Delete):
+            self.undo()
         else:
             super().keyPressEvent(event)
 
-    def deactivate(self):
-        self._clear()
-        super().deactivate()
-
     def _finish(self):
-        if len(self.points) < 2:
+        points = [QgsPointXY(point) for point in self.points()]
+        self.stopCapturing()
+        if len(points) >= 2:
+            self.finished(points)
+
+    def _arm_snapping(self):
+        project = QgsProject.instance()
+        config = project.snappingConfig()
+        self._saved_snap = {
+            "enabled": config.enabled(),
+            "mode": config.mode(),
+            "type": config.typeFlag(),
+            "tolerance": config.tolerance(),
+            "units": config.units(),
+        }
+        config.setEnabled(True)
+        config.setMode(QgsSnappingConfig.AllLayers)
+        config.setTypeFlag(QgsSnappingConfig.VertexFlag | QgsSnappingConfig.SegmentFlag)
+        if not self._saved_snap["enabled"]:
+            config.setUnits(Qgis.MapToolUnit.Pixels)
+            config.setTolerance(12)
+        project.setSnappingConfig(config)
+        tracer = QgsMapCanvasTracer.tracerForCanvas(self.canvas())
+        action = tracer.actionEnableTracing() if tracer is not None else None
+        if action is not None and not action.isChecked():
+            action.trigger()
+            self._tracing_action = action
+
+    def _restore_snapping(self):
+        if self._tracing_action is not None and self._tracing_action.isChecked():
+            self._tracing_action.trigger()
+        self._tracing_action = None
+        saved = self._saved_snap
+        self._saved_snap = None
+        if not saved:
             return
-        points = list(self.points)
-        self._clear()
-        self.finished(points)
-
-    def _redraw(self):
-        self.band.reset(QgsWkbTypes.LineGeometry)
-        for point in self.points:
-            self.band.addPoint(point)
-
-    def _clear(self):
-        self.points = []
-        self.band.reset(QgsWkbTypes.LineGeometry)
+        config = QgsProject.instance().snappingConfig()
+        config.setEnabled(saved["enabled"])
+        config.setMode(saved["mode"])
+        config.setTypeFlag(saved["type"])
+        config.setTolerance(saved["tolerance"])
+        config.setUnits(saved["units"])
+        QgsProject.instance().setSnappingConfig(config)
 
 
 class EnclosureMapTool(QgsMapTool):
@@ -168,6 +212,10 @@ class OspConnectivityPlugin:
         self._action("Trace selection", self.trace_selection)
         self._action("Add fiber enclosure", self.start_enclosure)
         self._action("Add patch panel", self.start_panel)
+        self._action("View patch panel", self.start_panel_view)
+        self._action("View switch", self.start_switch_view)
+        self._action("Add switch", self.start_switch)
+        self._action("Patching", self.patching)
         self._action("Add device", self.start_device)
         self._action("Add cable", self.start_cable)
         self._action("Set snap tolerance", self.set_tolerance)
@@ -237,6 +285,27 @@ class OspConnectivityPlugin:
         canvas.setMapTool(self.tool)
         self.iface.messageBar().pushInfo("OSP Connectivity", "Click an IDF to add a patch panel.")
 
+    def start_switch(self):
+        canvas = self.iface.mapCanvas()
+        self.tool = EnclosureMapTool(canvas, lambda point: self._run("Add switch", lambda: self._add_switch(point)))
+        canvas.setMapTool(self.tool)
+        self.iface.messageBar().pushInfo("OSP Connectivity", "Click an IDF to add a switch.")
+
+    def patching(self):
+        self._run("Patching", self._patch)
+
+    def start_panel_view(self):
+        canvas = self.iface.mapCanvas()
+        self.tool = EnclosureMapTool(canvas, lambda point: self._run("View patch panel", lambda: self._view_panel(point)))
+        canvas.setMapTool(self.tool)
+        self.iface.messageBar().pushInfo("OSP Connectivity", "Click an IDF to view one of its patch panels.")
+
+    def start_switch_view(self):
+        canvas = self.iface.mapCanvas()
+        self.tool = EnclosureMapTool(canvas, lambda point: self._run("View switch", lambda: self._view_switch(point)))
+        canvas.setMapTool(self.tool)
+        self.iface.messageBar().pushInfo("OSP Connectivity", "Click an IDF to view one of its switches.")
+
     def start_device(self):
         canvas = self.iface.mapCanvas()
         self.tool = EnclosureMapTool(canvas, lambda point: self._run("Add device", lambda: self._add_device(point)))
@@ -245,9 +314,16 @@ class OspConnectivityPlugin:
 
     def start_cable(self):
         canvas = self.iface.mapCanvas()
-        self.tool = SketchTool(canvas, lambda points: self._run("Add cable", lambda: self._add_cable(points)))
+        self.tool = SketchTool(
+            canvas,
+            self.iface.cadDockWidget(),
+            lambda points: self._run("Add cable", lambda: self._add_cable(points)),
+        )
         canvas.setMapTool(self.tool)
-        self.iface.messageBar().pushInfo("OSP Connectivity", "Left-click the cable path. Right-click or Enter to finish.")
+        self.iface.messageBar().pushInfo(
+            "OSP Connectivity",
+            "Left-click the cable path. It snaps to existing geometry, including duct banks. Right-click or Enter to finish.",
+        )
 
     def set_tolerance(self):
         project = QgsProject.instance()
@@ -362,6 +438,13 @@ class OspConnectivityPlugin:
             return ""
         if spec.get("x") is None or spec.get("y") is None:
             return f"{spec['panel_id']} was not created because {spec['idf_id']} has no location."
+        count = spec.get("port_count")
+        if not count:
+            dialog = PortCountDialog(spec["panel_id"], self.iface.mainWindow())
+            if dialog.exec_() != dialog.Accepted:
+                raise Cancelled()
+            count = dialog.port_count()
+            spec["port_count"] = count
         _layers, infos, layer = ensure_panel_layer(project, layers, infos, spec.get("media") == "fiber")
         info = next(item for item in infos if item.layer_id == layer.id())
         add_panel_feature(
@@ -373,8 +456,9 @@ class OspConnectivityPlugin:
             spec["panel_id"],
             spec["idf_id"],
             spec.get("media") or "copper",
+            int(count),
         )
-        return f"Patch panel {spec['panel_id']} was added for {spec['idf_id']}."
+        return f"Patch panel {spec['panel_id']} was added for {spec['idf_id']} with {int(count)} ports."
 
     def _add_panel(self, canvas_point):
         project, point_xy, layers, infos, features = self._click_context(canvas_point)
@@ -1261,9 +1345,188 @@ class OspConnectivityPlugin:
             existing.add(key)
             inserts.append(RowInsert("cable_handhole", row, "cable_handhole"))
 
+    def _add_switch(self, canvas_point):
+        project, point_xy, layers, infos, features = self._click_context(canvas_point)
+        idf = self._idf_at(project, layers, features, point_xy, self._tolerance(project))
+        if idf is None:
+            raise RuntimeError("Click an IDF to add a switch.")
+        layers, infos, store = ensure_switch_tables(project, layers, infos)
+        tables = read_tables(layers, infos)
+        existing = [text_of(row.get("sw_id")) for row in tables.get("switches") or [] if text_of(row.get("sw_id"))]
+        dialog = SwitchDialog(suggest_switch_id(existing, feature_id(idf) or ""), existing, self.iface.mainWindow())
+        if dialog.exec_() != dialog.Accepted:
+            return
+        choice = dialog.choices()
+        ports = expand_switch_ports(choice["sw_port_count"], choice["first_port"])
+        session = EditSession()
+        try:
+            add_table_row(
+                session,
+                store["switch"],
+                {
+                    "sw_id": choice["sw_id"],
+                    "sw_name": choice["sw_name"],
+                    "sw_port_count": choice["sw_port_count"],
+                    "make": choice["make"],
+                    "model": choice["model"],
+                    "rack_number": choice["rack_number"],
+                    "ru_number": choice["ru_number"],
+                    "mdf_idf_id": feature_id(idf),
+                    "status": "proposed",
+                },
+            )
+            for port in ports:
+                add_table_row(
+                    session,
+                    store["switch_port"],
+                    {
+                        "switch_port_id": port["switch_port_id"],
+                        "switch_port_name": port["switch_port_name"],
+                        "sw_id": choice["sw_id"],
+                        "status": "proposed",
+                    },
+                )
+            errors = session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        if errors:
+            raise RuntimeError("\n".join(errors))
+        self._show(
+            f"{choice['sw_id']} was added on {feature_id(idf)} with {len(ports)} ports "
+            f"({ports[0]['switch_port_id']} through {ports[-1]['switch_port_id']}).\n"
+            "Save layer edits to keep this. Undo reverses it until then."
+        )
+        self.iface.mapCanvas().refresh()
+
+    def _patch(self):
+        project = QgsProject.instance()
+        layers, infos = scan(project)
+        layers, infos, store = ensure_switch_tables(project, layers, infos)
+        features = read_features(project, layers, infos)
+        tables = read_tables(layers, infos)
+        idfs = [feature for feature in features if feature.get("role") == "idf" and feature_id(feature)]
+        if not idfs:
+            raise RuntimeError("This project has no IDF to patch.")
+        dialog = PatchDialog(idfs, features, tables, self.iface.mainWindow())
+        if dialog.exec_() != dialog.Accepted:
+            return
+        rows = dialog.patches()
+        if not rows:
+            return
+        session = EditSession()
+        try:
+            for row in rows:
+                add_table_row(session, store["cross_connect"], row)
+            errors = session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        if errors:
+            raise RuntimeError("\n".join(errors))
+        self._show(
+            f"Added {len(rows)} patch(es).\nSave layer edits to keep this. Undo reverses it until then."
+        )
+
+    def _view_panel(self, canvas_point):
+        project, point_xy, layers, infos, features = self._click_context(canvas_point)
+        idf = self._idf_at(project, layers, features, point_xy, self._tolerance(project))
+        if idf is None:
+            raise RuntimeError("Click an IDF to view a patch panel.")
+        panels = panels_on_idf(feature_id(idf) or "", features)
+        if not panels:
+            raise RuntimeError(f"{feature_id(idf)} has no patch panels.")
+        chooser = ChooseAssetDialog(
+            "View patch panel",
+            "Which patch panel would you like to view?",
+            [(choice_label(feature_id(panel), (panel.get("values") or {}).get("name")), panel) for panel in panels],
+            self.iface.mainWindow(),
+        )
+        if chooser.exec_() != chooser.Accepted:
+            return
+        panel = chooser.selected()
+        if panel is None:
+            return
+        tolerance = self._tolerance(project)
+        tables = read_tables(layers, infos)
+        inventory = panel_ports(panel, features, tables)
+        for port in inventory["ports"]:
+            if not port["occupied"]:
+                port["detail"] = f"Port {port['number']} is open."
+                continue
+            lines = [f"Port {port['number']}"]
+            if port.get("device_id"):
+                lines.append(f"Device: {port['device_id']}")
+            if port.get("cable_id"):
+                lines.append(f"Cable: {port['cable_id']}")
+            if port.get("switch_id"):
+                lines.append(f"Switch: {port['switch_id']}")
+            if port.get("switch_port_id"):
+                lines.append(f"Switch port: {port['switch_port_id']}")
+            seed = port.get("device") or port.get("cable")
+            if seed is not None:
+                traced = trace_selection([seed], features, tables, tolerance)
+                lines.append("")
+                lines.append(format_report(traced))
+            port["detail"] = "\n".join(lines)
+        inventory["title"] = choice_label(feature_id(panel), (panel.get("values") or {}).get("name"))
+        PanelViewDialog(inventory, self.iface.mainWindow()).exec_()
+
+    def _view_switch(self, canvas_point):
+        project, point_xy, layers, infos, features = self._click_context(canvas_point)
+        idf = self._idf_at(project, layers, features, point_xy, self._tolerance(project))
+        if idf is None:
+            raise RuntimeError("Click an IDF to view a switch.")
+        tables = read_tables(layers, infos)
+        switches = switches_for_idf(feature_id(idf) or "", tables.get("switches") or [])
+        if not switches:
+            raise RuntimeError(f"{feature_id(idf)} has no switches.")
+        chooser = ChooseAssetDialog(
+            "View switch",
+            "Which switch would you like to view?",
+            [(choice_label(row.get("sw_id"), row.get("sw_name")), row) for row in switches],
+            self.iface.mainWindow(),
+        )
+        if chooser.exec_() != chooser.Accepted:
+            return
+        switch = chooser.selected()
+        if not switch:
+            return
+        inventory = switch_inventory(switch, tables.get("switch_ports") or [], tables.get("patches") or [])
+        for port in inventory["ports"]:
+            if not port["occupied"]:
+                port["detail"] = f"{port['switch_port_id']} is open."
+                continue
+            lines = [port["switch_port_id"]]
+            if port.get("switch_port_name") and port["switch_port_name"].casefold() != port["switch_port_id"].casefold():
+                lines.append(f"Name: {port['switch_port_name']}")
+            if port.get("panel_id"):
+                lines.append(f"Patch panel: {port['panel_id']}")
+            if port.get("panel_port"):
+                lines.append(f"Panel port: {port['panel_port']}")
+            panel = next((feature for feature in features if feature_id(feature) == port.get("panel_id")), None)
+            wanted = set(parse_range(port.get("panel_port")))
+            if panel is not None and wanted:
+                seen = set()
+                for item in panel_ports(panel, features, tables)["ports"]:
+                    if item["number"] not in wanted:
+                        continue
+                    pair = (item.get("device_id") or "", item.get("cable_id") or "")
+                    if pair in seen or pair == ("", ""):
+                        continue
+                    seen.add(pair)
+                    if item.get("device_id"):
+                        lines.append(f"Device: {item['device_id']}")
+                    if item.get("cable_id"):
+                        lines.append(f"Cable: {item['cable_id']}")
+            port["detail"] = "\n".join(lines)
+        PanelViewDialog(inventory, self.iface.mainWindow()).exec_()
+
     def _run(self, title, function) -> None:
         try:
             function()
+        except Cancelled:
+            return
         except Exception as exc:
             QgsMessageLog.logMessage(traceback.format_exc(), "OSP Connectivity", Qgis.Critical)
             QMessageBox.critical(self.iface.mainWindow(), title, str(exc))

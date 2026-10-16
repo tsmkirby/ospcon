@@ -42,9 +42,13 @@ The **OSP Connectivity** toolbar has these actions. Results open in the **OSP Re
 | Modify associations | Select one device. Change its panel, port, and handholes, then save. |
 | Trace selection | Follows the selected device, cable, or IDF and highlights the path. |
 | Add fiber enclosure | Click a fiber cable. The cable is split and you choose which strands are spliced. |
-| Add patch panel | Click an IDF. A copper cable gets a copper panel and a fiber cable gets a fiber panel, with the port and ends recorded in the dialog. |
+| Add patch panel | Click an IDF. A copper cable gets a copper panel and a fiber cable gets a fiber panel, with the port and ends recorded in the dialog. A new panel asks for its port count and is stored on that IDF. |
+| View patch panel | Click an IDF, then choose one of its patch panels. Every port is shown, and an occupied port opens the device and cable on it. |
+| View switch | Click an IDF, then choose one of its switches. Patched ports show the panel and port. |
+| Add switch | Click an IDF. Creates the switch, with ports such as `gi1/0/1`, on that IDF. |
+| Patching | Cross-connect an open patch-panel port to an open switch port at the same IDF. |
 | Add device | Click the map. Choose the device layer and a unique name. A cable under the click is associated in the same dialog. |
-| Add cable | Draw a line. If it meets a device and an IDF or patch panel, the dialog records that association. |
+| Add cable | Draw a line. Snapping and tracing follow the line tool, so the path can follow a duct bank. If it meets a device and an IDF or patch panel, the dialog records that association. |
 | Set snap tolerance | Sets the distance used for duct chaining, enclosure clicks, and panel clicks. |
 
 ### Build associations
@@ -131,13 +135,35 @@ If the click is on a cable, the dialog also asks for the cable ends, the IDF, an
 
 ### Add cable
 
-Choose **Add cable**. Left-click the path and right-click, or press Enter, to finish. Pick the cable layer and a unique cable id.
+Choose **Add cable**. Left-click the path and right-click, or press Enter, to finish. The sketch snaps to existing geometry and can trace a duct bank, the same way the line tool does. Pick the cable layer and a unique cable id.
 
 If the line meets one device and an IDF or a patch panel, the dialog records the ends, panel, and port the same way **Associate selection** does. When the IDF has no panel yet, the name you type is created on that IDF.
 
 ### Add patch panel
 
-Choose **Add patch panel**, then click an IDF. Enter a panel id that is not already used.
+Choose **Add patch panel**, then click an IDF. Enter a panel id that is not already used. A new panel asks for its port count, and that count is stored on the panel along with the IDF.
+
+### View patch panel
+
+Choose **View patch panel** and click an IDF. The dialog asks which patch panel to view and lists each one by its id, with the panel name beside it when the panel has a name. The next dialog draws every port. Occupied ports are blue and open ports are light. Click an occupied port to see the device and cable on that port, with the trace for that circuit.
+
+### View switch
+
+Choose **View switch** and click an IDF. Pick a switch from the list, shown by switch id and name. The dialog draws that switch's ports. A patched port is blue. Click it to see the patch panel, the panel port, and the device and cable on that port when they are known.
+
+A panel created from **Associate selection**, **Modify associations**, **Add device**, or **Add cable** asks for the port count in the same way.
+
+### Add switch
+
+Choose **Add switch** and click an IDF. The dialog asks for the switch id (`VIB-SW-0001`), name, port count, make, model, rack, and RU. The switch is stored on that IDF. Its ports are created from the first port id, so `gi1/0/1` with 24 ports becomes `gi1/0/1` through `gi1/0/24`.
+
+If the project has no switch table yet, the plugin adds OSP Switches, OSP Switch Ports, and OSP Cross Connects next to the project, and relates them to each other and to the IDF.
+
+### Patching
+
+Choose **Patching**. Pick the IDF, then copper or fiber. Copper uses the patch panels on that IDF. Fiber uses the fiber panels. The port list shows only ports that are not already patched or cabled. Fiber is offered as odd-even pairs (`1-2`, `3-4`) unless you check **Single fiber circuit**. Then pick the switch on that IDF and one of its free ports, such as `gi1/0/3`. Click **Add patch**, then **Save**.
+
+The patches already stored for that IDF are listed in the same dialog.
 
 A copper cable under the click is tied to a copper panel. A fiber cable is tied to a fiber panel, and the dialog asks for the strand numbers. When both cross the same point, the dialog asks for each one. The panel is created on the matching panel layer. The dialog also asks for the cable ends and the port, the same way **Associate selection** does, and a device that sits on that cable is linked. A value that is already filled in is left as it is.
 
