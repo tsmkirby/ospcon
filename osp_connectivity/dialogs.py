@@ -287,6 +287,44 @@ class SpliceDialog(QDialog):
         }
 
 
+class CircuitCardDialog(QDialog):
+    """Choose which traced circuits become printable cards."""
+
+    def __init__(self, reports, parent=None):
+        super().__init__(parent)
+        self.reports = list(reports)
+        self.setWindowTitle("Circuit card")
+        self.resize(420, 420)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Check the circuits to print. Each one is a page in the PDF."))
+        self.items = QListWidget()
+        for index, report in enumerate(self.reports):
+            item = QListWidgetItem(item_label(report, index))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setData(Qt.UserRole, index)
+            self.items.addItem(item)
+        layout.addWidget(self.items)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def choices(self) -> dict:
+        reports = []
+        for index in range(self.items.count()):
+            item = self.items.item(index)
+            if item.checkState() == Qt.Checked:
+                reports.append(self.reports[item.data(Qt.UserRole)])
+        return {"reports": reports}
+
+    def _accept(self) -> None:
+        if not self.choices()["reports"]:
+            QMessageBox.warning(self, "Circuit card", "Select at least one circuit.")
+            return
+        self.accept()
+
+
 class ExportDialog(QDialog):
     """Choose which traced circuits and columns go into a CSV or Excel file."""
 

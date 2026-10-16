@@ -33,7 +33,7 @@ Copy the folder rather than making a shortcut. QGIS reads the plugin from that d
 
 ## Toolbar
 
-The **OSP Connectivity** toolbar has these actions. Results open in the **OSP Report** dock, which can copy the text, export a spreadsheet, or clear the map highlight.
+The **OSP Connectivity** toolbar has these actions. Results open in the **OSP Report** dock, which can copy the text, export a spreadsheet, print a circuit card, or clear the map highlight.
 
 | Action | What it does |
 | --- | --- |
@@ -91,6 +91,12 @@ Device, Pole, Cable, Cable type, Length, Ducts, IDF, Panel, Port, Strands, Segme
 Create a new `.csv` or `.xlsx` file, or add the checked rows to a file you already have. Adding rows keeps the columns already in that file, including columns you added by hand, and appends any selected column that is not there yet. Trace another circuit later and add it to the same file. The column names do not change, so the sheet can grow into one table.
 
 CSV files are UTF-8, which lets Excel on Windows keep the ids and strand text intact. Excel workbooks are `.xlsx` and do not need a separate Python package.
+
+### Print a circuit card
+
+**Circuit card** in the OSP Report dock uses the current trace. Check the circuits to include. Each one becomes a page in a PDF: the device, the path from that device through the cable segments and enclosures to the panel and IDF, then the pole, cable, ducts, strands, and any warnings.
+
+Save the PDF and print it from the viewer that opens. The card does not need a separate Python package.
 
 ### Add fiber enclosure
 
@@ -156,4 +162,4 @@ Known field names are read as aliases. `a_end_location` and `a_end_id` are both 
 
 ## What this version does not do
 
-Dark-fiber inventory, a separate duct-fill report, a standing validation dock, printable circuit cards, and copper pair counts are not in this version. A fiber layer that has no A and Z ends is reported, and the plugin does not force it into a full circuit.
+Dark-fiber inventory, a separate duct-fill report, a standing validation dock, and copper pair counts are not in this version. A fiber layer that has no A and Z ends is reported, and the plugin does not force it into a full circuit.

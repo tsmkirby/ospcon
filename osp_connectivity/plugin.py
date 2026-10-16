@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import traceback
 
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import Qt, QUrl
+from qgis.PyQt.QtGui import QColor, QDesktopServices
 from qgis.PyQt.QtWidgets import (
     QAction,
     QApplication,
@@ -51,6 +51,7 @@ from .bridge import (
     split_cable,
 )
 from .core.associate import assignment_edits, occupied_ports, propose
+from .core.cards import write_circuit_cards
 from .core.catalog import feature_id
 from .core.export import export_reports
 from .core.fields import enclosure_id_from_prefix, media_of, next_id, parse_count, suggest_enclosure_prefix, text_of
@@ -74,7 +75,7 @@ from .core.place import (
 )
 from .core.strands import build_splice_rows
 from .core.trace import format_report, trace_selection
-from .dialogs import AssociateDialog, ExportDialog, PatchPanelDialog, PlacementDialog, SpliceDialog
+from .dialogs import AssociateDialog, CircuitCardDialog, ExportDialog, PatchPanelDialog, PlacementDialog, SpliceDialog
 
 
 class SketchTool(QgsMapTool):
@@ -163,13 +164,16 @@ class OspConnectivityPlugin:
         self.report.setPlaceholderText("Association and trace reports appear here.")
         copy_button = QPushButton("Copy")
         export_button = QPushButton("Export")
+        card_button = QPushButton("Circuit card")
         clear_button = QPushButton("Clear highlight")
         copy_button.clicked.connect(self._copy)
         export_button.clicked.connect(self._export)
+        card_button.clicked.connect(self._circuit_card)
         clear_button.clicked.connect(self.clear_highlight)
         row = QHBoxLayout()
         row.addWidget(copy_button)
         row.addWidget(export_button)
+        row.addWidget(card_button)
         row.addWidget(clear_button)
         holder = QWidget()
         layout = QVBoxLayout(holder)
@@ -1059,6 +1063,31 @@ class OspConnectivityPlugin:
         written = export_reports(path, choice["reports"], choice["fields"], append)
         verb = "Added" if append else "Wrote"
         self.iface.messageBar().pushInfo("OSP Connectivity", f"{verb} {written} row(s) in {path}.")
+
+    def _circuit_card(self) -> None:
+        if not self._reports:
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "Circuit card",
+                "Trace a selection first. The circuit card is built from that trace.",
+            )
+            return
+        dialog = CircuitCardDialog(self._reports, self.iface.mainWindow())
+        if dialog.exec_() != dialog.Accepted:
+            return
+        path, _filter = QFileDialog.getSaveFileName(
+            self.iface.mainWindow(),
+            "Save circuit card",
+            "OSP circuit card.pdf",
+            "PDF (*.pdf)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path = f"{path}.pdf"
+        pages = write_circuit_cards(path, dialog.choices()["reports"])
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        self.iface.messageBar().pushInfo("OSP Connectivity", f"Wrote {pages} circuit card page(s) in {path}.")
 
     def _run(self, title, function) -> None:
         try:
