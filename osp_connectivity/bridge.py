@@ -208,27 +208,34 @@ def existing_keys(features: list[dict], tables: dict) -> dict:
 class EditSession:
     def __init__(self):
         self.layers = []
+        self._commands = []
 
     def edit(self, layer: QgsVectorLayer) -> QgsVectorLayer:
         if layer not in self.layers:
             if not layer.isEditable() and not layer.startEditing():
                 raise RuntimeError(f"{layer.name()} is not editable.")
-            layer.beginEditCommand("OSP Connectivity")
+            # A command that is already open belongs to the user. Nesting a second
+            # one leaves the outer command open, and QGIS then disables Undo.
+            if not layer.isEditCommandActive():
+                layer.beginEditCommand("OSP Connectivity")
+                self._commands.append(layer)
             self.layers.append(layer)
         return layer
 
     def commit(self) -> list[str]:
         """Close the undo step and leave the layers editable so one Undo can reverse it."""
+        for layer in self._commands:
+            if layer.isEditable() and layer.isEditCommandActive():
+                layer.endEditCommand()
         for layer in self.layers:
             if layer.isEditable():
-                layer.endEditCommand()
                 layer.updateExtents()
                 layer.triggerRepaint()
         return []
 
     def rollback(self) -> None:
-        for layer in self.layers:
-            if layer.isEditable():
+        for layer in self._commands:
+            if layer.isEditable() and layer.isEditCommandActive():
                 layer.destroyEditCommand()
 
 
@@ -461,7 +468,25 @@ def ensure_panel_layer(project: QgsProject, layers: dict, infos: list, fiber: bo
     raise RuntimeError("Could not open the patch panel layer after creating it.")
 
 
-def add_mapped_feature(session, project, layer, info, geometry, values: dict, kind: str):
+def unset_fields(layer, info, values: dict) -> list:
+    """Layer fields still worth asking for. FID and associations already written are omitted."""
+    from .core.fields import suppressed_fields
+
+    hidden = suppressed_fields(getattr(info, "field_map", {}) or {}, values)
+    unset = []
+    fields = layer.fields()
+    for index in range(fields.count()):
+        field = fields.at(index)
+        if field.name().casefold() in hidden or field.isReadOnly():
+            continue
+        setup = layer.editorWidgetSetup(index)
+        if setup is not None and setup.type() == "Hidden":
+            continue
+        unset.append(field)
+    return unset
+
+
+def add_mapped_feature(session, project, layer, info, geometry, values: dict, kind: str, attributes: dict | None = None):
     """Add a point or line and set the canonical fields that this layer actually has."""
     session.edit(layer)
     created = QgsFeature(layer.fields())
@@ -475,11 +500,37 @@ def add_mapped_feature(session, project, layer, info, geometry, values: dict, ki
     for canonical, value in values.items():
         if value is not None:
             _set_field(created, info, canonical, value)
+    for name, value in (attributes or {}).items():
+        if value is None:
+            continue
+        index = created.fields().indexFromName(name)
+        if index >= 0:
+            created.setAttribute(index, value)
     if kind == "line" and qgs_geometry is not None:
         _set_length(created, info, qgs_geometry, layer)
     if not layer.addFeature(created):
         raise RuntimeError(f"Could not add the feature on {layer.name()}.")
     return created.id()
+
+
+def _add_missing_fields(layer, fields) -> None:
+    """Add fields without rewriting the provider underneath an open edit buffer.
+
+    A provider schema change while the layer is editable desyncs that buffer.
+    Discarding the edit session can then drop every feature in the layer.
+    """
+    names = {field.name().casefold() for field in layer.fields()}
+    missing = [field for field in fields if field.name().casefold() not in names]
+    if not missing:
+        return
+    if layer.isEditable():
+        for field in missing:
+            if not layer.addAttribute(field):
+                raise RuntimeError(f"Could not add {field.name()} on {layer.name()}.")
+        return
+    if not layer.dataProvider().addAttributes(missing):
+        raise RuntimeError(f"Could not add fields on {layer.name()}.")
+    layer.updateFields()
 
 
 def ensure_id_field(layer, role: str) -> None:
@@ -490,16 +541,14 @@ def ensure_id_field(layer, role: str) -> None:
     candidates = id_candidates(role) or ["device_id"]
     if any(candidate.casefold() in names for candidate in candidates):
         return
-    added = layer.dataProvider().addAttributes(
+    _add_missing_fields(
+        layer,
         [
             QgsField(candidates[0], QVariant.String),
             QgsField("device_name", QVariant.String),
             QgsField("status", QVariant.String),
-        ]
+        ],
     )
-    if not added:
-        raise RuntimeError(f"Could not add an id field on {layer.name()}.")
-    layer.updateFields()
 
 
 def ensure_port_count_field(layer) -> None:
@@ -507,9 +556,7 @@ def ensure_port_count_field(layer) -> None:
     names = {field.name().casefold() for field in layer.fields()}
     if "port_count" in names or "position_count" in names:
         return
-    if not layer.dataProvider().addAttributes([QgsField("port_count", QVariant.Int)]):
-        raise RuntimeError(f"Could not add port_count on {layer.name()}.")
-    layer.updateFields()
+    _add_missing_fields(layer, [QgsField("port_count", QVariant.Int)])
 
 
 def add_panel_feature(session, project, layer, info, point, panel_id: str, idf_id: str, media: str, port_count: int = 0) -> None:
@@ -581,22 +628,18 @@ def _ensure_cable_end_fields(layers, infos) -> None:
             continue
         if "a_end_location" in names or "a_end_id" in names:
             if "strand_count" not in names and "fiber_count" not in names:
-                if not layer.dataProvider().addAttributes([QgsField("strand_count", QVariant.Int)]):
-                    raise RuntimeError(f"Could not add strand_count on {layer.name()}.")
-                layer.updateFields()
+                _add_missing_fields(layer, [QgsField("strand_count", QVariant.Int)])
             continue
-        added = layer.dataProvider().addAttributes(
+        _add_missing_fields(
+            layer,
             [
                 QgsField("a_end_type", QVariant.String),
                 QgsField("a_end_id", QVariant.String),
                 QgsField("z_end_type", QVariant.String),
                 QgsField("z_end_id", QVariant.String),
                 QgsField("strand_count", QVariant.Int),
-            ]
+            ],
         )
-        if not added:
-            raise RuntimeError(f"Could not add cable end fields on {layer.name()}.")
-        layer.updateFields()
 
 
 def _cable_gpkg(layers, infos):

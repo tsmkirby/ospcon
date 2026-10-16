@@ -5,11 +5,30 @@ import unittest
 from osp_connectivity.core.associate import assignment_edits, device_association, modification_edits, port_in_use, propose
 from osp_connectivity.core.enclosures import enclosure_association, enclosure_edits, enclosure_end_links
 from osp_connectivity.core.catalog import build_index, end_convention
-from osp_connectivity.core.fields import enclosure_id, enclosure_id_from_prefix, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix
+from osp_connectivity.core.fields import (
+    enclosure_id,
+    enclosure_id_from_prefix,
+    mapped_names,
+    mapped_values,
+    media_of,
+    next_id,
+    parse_count,
+    parse_range,
+    suggest_enclosure_prefix,
+    suppressed_fields,
+)
 from osp_connectivity.core.geometry import chain_segments, ducts_along_cable, split_linestring
 from osp_connectivity.core.link import plan_links
 from osp_connectivity.core.panels import cable_idf_edits, panel_ports, panels_for, suggest_panel_id
-from osp_connectivity.core.place import device_layer_choices, name_taken, panel_click_edits, panel_media_groups, placement_edits
+from osp_connectivity.core.place import (
+    adopt_typed_id,
+    device_layer_choices,
+    name_taken,
+    nearest_feature,
+    panel_click_edits,
+    panel_media_groups,
+    placement_edits,
+)
 from osp_connectivity.core.roles import classify
 from osp_connectivity.core.strands import build_splice_rows, compress_splices, validate_edits
 from osp_connectivity.core.switches import (
@@ -89,6 +108,10 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(parse_count("72"), 72)
         self.assertEqual(parse_range("1-2"), [1, 2])
         self.assertEqual(parse_range("47-48"), [47, 48])
+        self.assertEqual(
+            mapped_names({"id": "ap_id", "name": "ap_name", "mount": "support_id"}, {"id": "AP-1", "name": "AP-1", "mount": None}),
+            {"ap_id", "ap_name"},
+        )
 
     def test_ids_follow_the_layer_they_came_from(self):
         self.assertEqual(next_id(["vib.fib.0001", "vib.fib.0004"], "vib.fib.0001"), "vib.fib.0005")
@@ -739,7 +762,19 @@ class AssociateAndTraceTests(unittest.TestCase):
         self.assertIn(("z_end", "IDF-1"), edits)
         self.assertIn(("z_panel", "PP-9"), edits)
         self.assertEqual(plan["device_values"]["cable_ref"], "CB-1")
+        self.assertEqual(plan["device_values"]["panel"], "PP-9")
+        self.assertEqual(plan["device_values"]["port"], "4")
         self.assertEqual(plan["new_panel"]["panel_id"], "PP-9")
+        hidden = suppressed_fields(
+            {"id": "ap_id", "cable_ref": "cable_id", "panel": "patch_panel_id", "port": "patch_panel_port"},
+            plan["device_values"],
+        )
+        self.assertIn("cable_id", hidden)
+        self.assertIn("patch_panel_id", hidden)
+        self.assertIn("patch_panel_port", hidden)
+        self.assertIn("fid", hidden)
+        self.assertNotIn("ap_id", hidden)
+        self.assertEqual(mapped_values({"id": "ap_id", "name": "ap_name"}, plan["device_values"])["ap_id"], "AP-9")
         self.assertEqual(plan["new_panel"]["idf_id"], "IDF-1")
         filled = feature("cable", 1, "CB-1", {"a_end": "KEEP"}, coords=[(0, 0), (10, 0)], layer_id="cables")
         kept = placement_edits(choices, filled, None, idf, new_device_id="AP-9", media="copper")
@@ -764,6 +799,15 @@ class AssociateAndTraceTests(unittest.TestCase):
         self.assertEqual(plan["cable_values"]["z_panel"], "PP-1")
         self.assertIn(("cable_ref", "CB-3"), {(edit["canonical"], edit["value"]) for edit in plan["edits"]})
         self.assertIsNone(plan["new_panel"])
+        cable_fields = {"id": "cable_id", "a_end": "a_end_location", "z_end": "z_end_location", "z_panel": "z_end_panel_id", "z_port": "z_end_port"}
+        cable_hidden = suppressed_fields(cable_fields, plan["cable_values"])
+        self.assertIn("a_end_location", cable_hidden)
+        self.assertIn("z_end_location", cable_hidden)
+        self.assertIn("z_end_panel_id", cable_hidden)
+        self.assertIn("z_end_port", cable_hidden)
+        self.assertIn("fid", cable_hidden)
+        self.assertNotIn("cable_id", cable_hidden)
+        self.assertEqual(mapped_values(cable_fields, plan["cable_values"])["cable_id"], "CB-3")
         layers = [
             {"layer_id": "pos", "name": "POS", "role": None, "geometry_type": "Point"},
             {"layer_id": "aps", "name": "AP", "role": "ap", "geometry_type": "Point"},
@@ -772,6 +816,56 @@ class AssociateAndTraceTests(unittest.TestCase):
         labels = [item["label"] for item in device_layer_choices(layers)]
         self.assertEqual(labels, ["POS", "AP"])
         self.assertTrue(name_taken("AP-1", ["ap-1"]))
+
+    def test_pole_and_cable_under_a_device_are_written_before_other_attributes(self):
+        cable = feature("cable", 1, "CB-1", coords=[(0, 0), (10, 0)], layer_id="cables")
+        pole = feature("structure", 3, "PL-1", coords=[(1, 0)], geometry="Point", layer_id="poles")
+        self.assertEqual(nearest_feature((1, 0.2), [pole, cable], {"structure"}, 1)["fid"], 3)
+        plan = placement_edits(
+            {"associate": False, "role": "ap"},
+            cable,
+            None,
+            None,
+            new_device_id="AP-9",
+            structure=pole,
+        )
+        self.assertEqual(plan["device_values"]["cable_ref"], "CB-1")
+        self.assertEqual(plan["device_values"]["mount"], "PL-1")
+        self.assertEqual(plan["mount"]["device_id"], "AP-9")
+        self.assertEqual(plan["mount"]["support_id"], "PL-1")
+        hidden = suppressed_fields(
+            {"id": "ap_id", "cable_ref": "cable_id", "mount": "mount_structure_id"},
+            plan["device_values"],
+        )
+        self.assertIn("cable_id", hidden)
+        self.assertIn("mount_structure_id", hidden)
+        self.assertNotIn("ap_id", hidden)
+        attributes = {"ap_id": "AP-10", "ap_name": "AP-9"}
+        adopt_typed_id(plan, {"id": "ap_id", "name": "ap_name"}, attributes, "device")
+        self.assertEqual(plan["device_values"]["id"], "AP-10")
+        self.assertEqual(plan["device_values"]["name"], "AP-10")
+        self.assertEqual(attributes["ap_name"], "AP-10")
+        self.assertEqual(plan["mount"]["mount_id"], "PL-1.AP-10")
+
+    def test_cable_touching_a_device_records_that_end_before_other_attributes(self):
+        device = feature("ap", 4, "AP-1", {"cable_ref": None}, coords=[(0, 0)], geometry="Point", layer_id="aps")
+        plan = placement_edits(
+            {"associate": False, "a_role": "device"},
+            None,
+            device,
+            None,
+            new_cable_id="CB-9",
+        )
+        self.assertEqual(plan["cable_values"]["a_end"], "AP-1")
+        self.assertEqual(plan["cable_values"]["id"], "CB-9")
+        self.assertIn(("cable_ref", "CB-9"), {(edit["canonical"], edit["value"]) for edit in plan["edits"]})
+        hidden = suppressed_fields({"id": "cable_id", "a_end": "a_end_location"}, plan["cable_values"])
+        self.assertIn("a_end_location", hidden)
+        self.assertNotIn("cable_id", hidden)
+        attributes = {"cable_id": "CB-10"}
+        adopt_typed_id(plan, {"id": "cable_id"}, attributes, "cable")
+        self.assertEqual(plan["cable_values"]["id"], "CB-10")
+        self.assertEqual(plan["edits"][0]["value"], "CB-10")
 
     def test_patch_panel_click_keeps_copper_and_fiber_apart(self):
         copper = feature(

@@ -38,6 +38,7 @@ from .bridge import (
     EditSession,
     add_enclosure_point,
     add_mapped_feature,
+    unset_fields,
     add_panel_feature,
     add_table_row,
     ensure_switch_tables,
@@ -60,7 +61,7 @@ from .core.cards import write_circuit_cards
 from .core.catalog import feature_id
 from .core.enclosures import enclosure_association, enclosure_edits, enclosure_end_links
 from .core.export import export_reports
-from .core.fields import enclosure_id_from_prefix, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix, text_of
+from .core.fields import enclosure_id_from_prefix, mapped_values, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix, text_of
 from .core.geometry import distance, split_linestring
 from .core.link import RowInsert, plan_links
 from .core.panels import panel_feature_ids, panel_ports, suggest_panel_id
@@ -70,7 +71,9 @@ from .core.place import (
     features_along_line,
     idfs_serving_cable,
     name_taken,
+    adopt_typed_id,
     nearest_cable,
+    nearest_feature,
     nearer_end_name,
     panel_click_edits,
     panel_media_groups,
@@ -84,6 +87,7 @@ from .core.switches import choice_label, expand_switch_ports, panels_on_idf, sug
 from .core.trace import format_report, trace_selection
 from .dialogs import (
     AssociateDialog,
+    BlankAttributeDialog,
     CircuitCardDialog,
     ExportDialog,
     ModifyDialog,
@@ -137,9 +141,10 @@ class SketchTool(QgsMapToolCapture):
 
     def _finish(self):
         points = [QgsPointXY(point) for point in self.points()]
+        source_crs = _capture_crs(self)
         self.stopCapturing()
         if len(points) >= 2:
-            self.finished(points)
+            self.finished(points, source_crs)
 
     def _arm_snapping(self):
         project = QgsProject.instance()
@@ -179,6 +184,18 @@ class SketchTool(QgsMapToolCapture):
         config.setTolerance(saved["tolerance"])
         config.setUnits(saved["units"])
         QgsProject.instance().setSnappingConfig(config)
+
+
+def _capture_crs(tool):
+    """CRS of the vertices from a capture tool.
+
+    QgsMapToolCapture keeps the sketch in the current layer's CRS. A click on
+    the map is only in the project CRS when that layer uses the project CRS.
+    """
+    layer = tool.layer()
+    if layer is not None and layer.crs().isValid():
+        return layer.crs()
+    return tool.canvas().mapSettings().destinationCrs()
 
 
 class EnclosureMapTool(QgsMapTool):
@@ -317,7 +334,7 @@ class OspConnectivityPlugin:
         self.tool = SketchTool(
             canvas,
             self.iface.cadDockWidget(),
-            lambda points: self._run("Add cable", lambda: self._add_cable(points)),
+            lambda points, source_crs: self._run("Add cable", lambda: self._add_cable(points, source_crs)),
         )
         canvas.setMapTool(self.tool)
         self.iface.messageBar().pushInfo(
@@ -890,6 +907,7 @@ class OspConnectivityPlugin:
         tolerance = self._tolerance(project)
         cables = [feature for feature in features if feature.get("role") == "cable"]
         cable = nearest_cable(point_xy, cables, tolerance)
+        structure = nearest_feature(point_xy, features, {"structure"}, tolerance)
         idfs = idfs_serving_cable(cable, features) if cable else []
         context = self._placement_context(cable, idfs, features, point_xy, ask_media=False)
         dialog = PlacementDialog(
@@ -912,6 +930,7 @@ class OspConnectivityPlugin:
         layers, infos, store = ensure_project(project, layers, infos)
         features = read_features(project, layers, infos)
         cable = self._same_feature(features, cable) if cable else None
+        structure = self._same_feature(features, structure) if structure else None
         idf = self._chosen_idf(features, idfs, choice.get("idf_id"))
         target = layers.get(choice["layer_id"])
         if target is None:
@@ -928,25 +947,31 @@ class OspConnectivityPlugin:
             new_device_id=choice["name"],
             panel_feature_ids=panel_feature_ids(features),
             media=choice.get("media") or context.get("media") or "copper",
+            structure=structure,
         )
+        attributes = self._remaining_attributes(target, info, plan["device_values"])
+        if attributes is None:
+            return
+        adopt_typed_id(plan, info.field_map, attributes, "device")
         session = EditSession()
         try:
-            add_mapped_feature(session, project, target, info, point_xy, plan["device_values"], "point")
+            add_mapped_feature(session, project, target, info, point_xy, plan["device_values"], "point", attributes)
             skipped = apply_plain_edits(session, layers, infos, plan["edits"])
             panel_note = self._create_panel(session, project, layers, infos, plan.get("new_panel"))
             self._store_circuit(session, store, plan.get("circuit"))
+            self._store_mount(session, store, plan.get("mount"))
             errors = session.commit()
         except Exception:
             session.rollback()
             raise
+        self._activate_for_undo(target)
         self._placement_report(choice["name"], plan, panel_note, skipped, errors)
 
-    def _add_cable(self, canvas_points):
+    def _add_cable(self, captured_points, source_crs):
         project = QgsProject.instance()
-        canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-        transform = QgsCoordinateTransform(canvas_crs, project.crs(), project)
+        transform = QgsCoordinateTransform(source_crs, project.crs(), project)
         line = []
-        for point in canvas_points:
+        for point in captured_points:
             moved = transform.transform(point)
             line.append((moved.x(), moved.y()))
         layers, infos = scan(project)
@@ -1026,9 +1051,15 @@ class OspConnectivityPlugin:
             for link in links:
                 if not plan["cable_values"].get(link["end"]):
                     plan["cable_values"][link["end"]] = link["enclosure_id"]
+        attributes = self._remaining_attributes(target, info, plan["cable_values"])
+        if attributes is None:
+            return
+        adopt_typed_id(plan, info.field_map, attributes, "cable")
+        for link in links:
+            link["membership"]["cable_id"] = plan["cable_values"].get("id") or choice["name"]
         session = EditSession()
         try:
-            add_mapped_feature(session, project, target, info, line, plan["cable_values"], "line")
+            add_mapped_feature(session, project, target, info, line, plan["cable_values"], "line", attributes)
             skipped = apply_plain_edits(session, layers, infos, plan["edits"])
             panel_note = self._create_panel(session, project, layers, infos, plan.get("new_panel"))
             self._store_circuit(session, store, plan.get("circuit"))
@@ -1042,6 +1073,7 @@ class OspConnectivityPlugin:
         except Exception:
             session.rollback()
             raise
+        self._activate_for_undo(target)
         names = ", ".join(link["enclosure_id"] for link in links)
         extra = [f"Enclosure: {names}"] if names else None
         self._placement_report(choice["name"], plan, panel_note, skipped, errors, extra)
@@ -1107,6 +1139,31 @@ class OspConnectivityPlugin:
         point = transform.transform(canvas_point)
         layers, infos = scan(project)
         return project, (point.x(), point.y()), layers, infos, read_features(project, layers, infos)
+
+    def _activate_for_undo(self, layer) -> None:
+        """Point Edit → Undo at the layer that just received the edit."""
+        if layer is not None:
+            self.iface.setActiveLayer(layer)
+
+    def _remaining_attributes(self, layer, info, values):
+        """Second dialog: the id already entered, and every attribute an association did not fill."""
+        fields = unset_fields(layer, info, values)
+        if not fields:
+            return {}
+        dialog = BlankAttributeDialog(
+            layer.name(),
+            fields,
+            self.iface.mainWindow(),
+            mapped_values(getattr(info, "field_map", {}) or {}, values),
+        )
+        if dialog.exec_() != dialog.Accepted:
+            return None
+        return dialog.values()
+
+    def _store_mount(self, session, store, mount) -> None:
+        if not mount or not store:
+            return
+        apply_inserts(session, store, [RowInsert("mounted_device", mount, "mount")])
 
     def _store_circuit(self, session, store, circuit) -> None:
         if not circuit or not store:

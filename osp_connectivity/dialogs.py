@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime, QVariant
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -831,6 +831,116 @@ class PlacementDialog(QDialog):
                 QMessageBox.warning(self, self.windowTitle(), "Enter the fiber strand numbers, such as 1-2.")
                 return
         self.accept()
+
+
+class BlankAttributeDialog(QDialog):
+    """Ask for the layer attributes that an association did not already fill."""
+
+    def __init__(self, layer_name: str, fields, parent=None, initials=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Add {layer_name}")
+        self.resize(480, 520)
+        self._editors = []
+        self._parsed = {}
+        self._initials = initials or {}
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "The id you entered is filled in. Cable, pole, panel, port, and end fields already determined are not listed. Leave a row blank to keep it empty."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        form = QFormLayout()
+        for field in fields:
+            editor = self._editor(field, self._initials.get(field.name()))
+            form.addRow(field.alias() or field.name(), editor)
+            self._editors.append((field, editor))
+        holder = QWidget()
+        holder.setLayout(form)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(holder)
+        layout.addWidget(scroll, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self) -> dict:
+        return dict(self._parsed)
+
+    def _editor(self, field, initial=None):
+        if field.type() == QVariant.Bool:
+            box = QComboBox()
+            box.addItem("", None)
+            box.addItem("Yes", True)
+            box.addItem("No", False)
+            if initial is True:
+                box.setCurrentIndex(1)
+            elif initial is False:
+                box.setCurrentIndex(2)
+            return box
+        edit = QLineEdit()
+        if initial is not None and str(initial).strip() != "":
+            edit.setText(str(initial))
+        if field.type() in (QVariant.Int, QVariant.UInt, QVariant.LongLong, QVariant.ULongLong):
+            edit.setPlaceholderText("Whole number")
+        elif field.type() == QVariant.Double:
+            edit.setPlaceholderText("Number")
+        elif field.type() == QVariant.Date:
+            edit.setPlaceholderText("YYYY-MM-DD")
+        elif field.type() in (QVariant.DateTime, QVariant.Time):
+            edit.setPlaceholderText("YYYY-MM-DD HH:MM")
+        return edit
+
+    def _accept(self) -> None:
+        try:
+            self._parsed = self._parse()
+        except ValueError as exc:
+            QMessageBox.warning(self, self.windowTitle(), str(exc))
+            return
+        self.accept()
+
+    def _parse(self) -> dict:
+        parsed = {}
+        for field, editor in self._editors:
+            label = field.alias() or field.name()
+            if isinstance(editor, QComboBox):
+                value = editor.currentData()
+                if value is not None:
+                    parsed[field.name()] = value
+                continue
+            text = editor.text().strip()
+            if not text:
+                continue
+            kind = field.type()
+            if kind in (QVariant.Int, QVariant.UInt, QVariant.LongLong, QVariant.ULongLong):
+                try:
+                    parsed[field.name()] = int(text)
+                except ValueError:
+                    raise ValueError(f"{label} needs a whole number.") from None
+            elif kind == QVariant.Double:
+                try:
+                    parsed[field.name()] = float(text)
+                except ValueError:
+                    raise ValueError(f"{label} needs a number.") from None
+            elif kind == QVariant.Date:
+                date = QDate.fromString(text, Qt.ISODate)
+                if not date.isValid():
+                    raise ValueError(f"{label} needs a date like 2026-10-16.")
+                parsed[field.name()] = date
+            elif kind == QVariant.DateTime:
+                stamp = QDateTime.fromString(text, "yyyy-MM-dd HH:mm")
+                if not stamp.isValid():
+                    raise ValueError(f"{label} needs a date and time like 2026-10-16 14:30.")
+                parsed[field.name()] = stamp
+            elif kind == QVariant.Time:
+                clock = QTime.fromString(text, "HH:mm")
+                if not clock.isValid():
+                    raise ValueError(f"{label} needs a time like 14:30.")
+                parsed[field.name()] = clock
+            else:
+                parsed[field.name()] = text
+        return parsed
 
 
 class PortCountDialog(QDialog):

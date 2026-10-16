@@ -47,8 +47,8 @@ The **OSP Connectivity** toolbar has these actions. Results open in the **OSP Re
 | View switch | Click an IDF, then choose one of its switches. Patched ports show the panel and port. |
 | Add switch | Click an IDF. Creates the switch, with ports such as `gi1/0/1`, on that IDF. |
 | Patching | Cross-connect an open patch-panel port to an open switch port at the same IDF. |
-| Add device | Click the map. Choose the device layer and a unique name. A cable under the click is associated in the same dialog. |
-| Add cable | Draw a line. Snapping and tracing follow the line tool, so the path can follow a duct bank. If it meets a device and an IDF or patch panel, the dialog records that association. |
+| Add device | Click the map. Choose the device layer and a unique name. A cable or pole under the click is written onto the device before the attribute dialog, and those fields are left off the form. |
+| Add cable | Draw a line. Snapping and tracing follow the line tool, so the path can follow a duct bank. Ends, panels, ports, and enclosures the line meets are written before the attribute dialog, and those fields are left off the form. |
 | Set snap tolerance | Sets the distance used for duct chaining, enclosure clicks, and panel clicks. |
 
 ### Build associations
@@ -131,13 +131,13 @@ The two pieces of a split cable are linked to each other and to the enclosure. T
 
 Choose **Add device** and click the map. The device type list is the point layers in the project that hold devices, such as AP, CCTV, and POS. The name has to be unique.
 
-If the click is on a cable, the dialog also asks for the cable ends, the IDF, and the panel and port. A panel name that is not already a feature is created on that IDF.
+If the click is on a cable, the dialog also asks for the cable ends, the IDF, and the panel and port. A panel name that is not already a feature is created on that IDF. A pole under the click is recorded as the mount. The cable, pole, panel, and port are written before the next dialog, and those fields are not listed there. That dialog is the chosen device layer. It shows the device id you entered, and the other attributes that are still empty. FID is not listed. Leave a row blank to keep that attribute empty.
 
 ### Add cable
 
 Choose **Add cable**. Left-click the path and right-click, or press Enter, to finish. The sketch snaps to existing geometry and can trace a duct bank, the same way the line tool does. Pick the cable layer and a unique cable id.
 
-If the line meets one device and an IDF or a patch panel, the dialog records the ends, panel, and port the same way **Associate selection** does. When the IDF has no panel yet, the name you type is created on that IDF.
+If the line meets one device and an IDF or a patch panel, the dialog records the ends, panel, and port the same way **Associate selection** does. When the IDF has no panel yet, the name you type is created on that IDF. A device, IDF, or splice enclosure the line meets is written onto the cable before the next dialog, and those end, panel, and port fields are not listed there. That dialog is the chosen cable layer. It shows the cable id you entered, and the other attributes that are still empty. FID is not listed. Leave a row blank to keep that attribute empty.
 
 ### Add patch panel
 
@@ -189,7 +189,7 @@ When the project has none of those tables, the first **Build associations** or *
 | OSP Splice Enclosures | The enclosure point |
 | OSP Enclosure Cables | Which cables enter the enclosure |
 
-Feature edits are one undo step per layer, named **OSP Connectivity**. They stay in the layer edit buffer until you save the layer edits. Undo reverses the step until then. Each GeoPackage has its own undo stack.
+Feature edits are one undo step per layer, named **OSP Connectivity**. The layer you just edited becomes the active layer, so **Edit → Undo** reverses that step. The features stay in the layer edit buffer until you save the layer edits. Turning editing off and discarding reverts that layer to the last save.
 
 ## How layers are recognized
 

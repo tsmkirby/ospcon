@@ -6,6 +6,64 @@ import re
 from typing import Iterable, Optional
 
 
+def mapped_names(field_map: dict, values: dict) -> set:
+    """Layer field names that already have a value from a canonical map."""
+    names = set()
+    for canonical, value in (values or {}).items():
+        if is_blank(value):
+            continue
+        actual = (field_map or {}).get(canonical)
+        if actual:
+            names.add(actual.casefold())
+    return names
+
+
+# Written from the click or the first dialog, so the attribute form does not ask again.
+_ASSOCIATION_FIELDS = (
+    "cable_ref",
+    "mount",
+    "panel",
+    "port",
+    "a_end",
+    "z_end",
+    "a_panel",
+    "z_panel",
+    "a_port",
+    "z_port",
+    "a_end_type",
+    "z_end_type",
+)
+_RECORD_FIELDS = {"fid", "ogc_fid"}
+
+
+def suppressed_fields(field_map: dict, values: dict) -> set:
+    """Field names to leave off the attribute form: FID, and associations already written."""
+    names = set(_RECORD_FIELDS)
+    for canonical in _ASSOCIATION_FIELDS:
+        if is_blank((values or {}).get(canonical)):
+            continue
+        names.add(canonical.casefold())
+        actual = (field_map or {}).get(canonical)
+        if actual:
+            names.add(actual.casefold())
+        for alias in _VALUE_CANDIDATES.get(canonical, []):
+            names.add(alias.casefold())
+    return names
+
+
+def mapped_values(field_map: dict, values: dict) -> dict:
+    """Real field names and values to show already filled in on the attribute form."""
+    hidden = suppressed_fields(field_map, values)
+    filled = {}
+    for canonical, value in (values or {}).items():
+        if is_blank(value):
+            continue
+        actual = (field_map or {}).get(canonical)
+        if actual and actual.casefold() not in hidden:
+            filled[actual] = value
+    return filled
+
+
 def is_blank(value) -> bool:
     if value is None:
         return True

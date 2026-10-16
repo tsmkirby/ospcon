@@ -98,6 +98,27 @@ def nearest_cable(point, cables: list[dict], tolerance: float):
     return best
 
 
+def nearest_feature(point, features: list[dict], roles, tolerance: float):
+    """Closest feature of the given roles whose geometry is within tolerance of the point."""
+    best = None
+    best_gap = tolerance
+    wanted = set(roles)
+    for feature in features:
+        if feature.get("role") not in wanted:
+            continue
+        coords = feature.get("coords") or []
+        if not coords:
+            continue
+        if len(coords) >= 2:
+            _point, gap, _measure = closest_on_line(point, coords)
+        else:
+            gap = distance(point, coords[0])
+        if gap <= best_gap:
+            best = feature
+            best_gap = gap
+    return best
+
+
 def features_along_line(line, features: list[dict], roles: set, tolerance: float) -> list[dict]:
     found = []
     if len(line) < 2:
@@ -139,6 +160,7 @@ def placement_edits(
     new_device_id: str | None = None,
     panel_feature_ids: list | None = None,
     media: str = "copper",
+    structure: dict | None = None,
 ) -> dict:
     """Field writes for a new or existing cable and device. Filled values are left alone."""
     warnings = []
@@ -154,9 +176,15 @@ def placement_edits(
         device_values["id"] = new_device_id
         device_values["name"] = new_device_id
         device_values["status"] = "proposed"
+    if new_device_id and cable and feature_id(cable):
+        device_values["cable_ref"] = feature_id(cable)
+    mount = _mount_row(structure, new_device_id, choices.get("role"))
+    if mount:
+        device_values["mount"] = mount["support_id"]
 
     if not choices.get("associate"):
-        return _result(edits, cable_values, device_values, None, warnings)
+        _record_loose_ends(choices, cable_values, device, idf, new_cable_id, edits, warnings)
+        return _result(edits, cable_values, device_values, None, warnings, mount=mount)
 
     panel = text_of(choices.get("panel_id"))
     port = text_of(choices.get("port"))
@@ -205,7 +233,7 @@ def placement_edits(
     new_panel = None
     if panel and idf:
         new_panel = new_panel_request(panel, idf, media, panel_feature_ids or [])
-    return _result(edits, cable_values, device_values, circuit, warnings, new_panel)
+    return _result(edits, cable_values, device_values, circuit, warnings, new_panel, mount)
 
 
 def panel_media_groups(point, features: list[dict], tolerance: float) -> list[dict]:
@@ -329,15 +357,82 @@ def _assign(feature, canonical, value, values: dict, edits: list, warnings: list
         warnings.append(f"{feature_id(feature) or canonical} already has {canonical} {current}.")
 
 
-def _result(edits, cable_values, device_values, circuit, warnings, new_panel=None) -> dict:
+def _result(edits, cable_values, device_values, circuit, warnings, new_panel=None, mount=None) -> dict:
     return {
         "edits": edits,
         "cable_values": cable_values,
         "device_values": device_values,
         "circuit": circuit,
         "new_panel": new_panel,
+        "mount": mount,
         "warnings": warnings,
     }
+
+
+def _mount_row(structure, device_id, role):
+    support = feature_id(structure) if structure else None
+    if not support or not device_id:
+        return None
+    return {
+        "mount_id": f"{support}.{device_id}",
+        "support_id": support,
+        "device_id": device_id,
+        "device_type": (role or "device").upper(),
+        "status": "proposed",
+    }
+
+
+def _record_loose_ends(choices, cable_values, device, idf, new_cable_id, edits, warnings) -> None:
+    """Write a device or IDF the new cable already touches when the full association dialog did not run."""
+    if not new_cable_id:
+        return
+    device_end = "a_end" if (choices.get("a_role") or "device") == "device" else "z_end"
+    idf_end = "z_end" if device_end == "a_end" else "a_end"
+    if device and feature_id(device):
+        cable_values[device_end] = feature_id(device)
+        _assign(device, "cable_ref", new_cable_id, {}, edits, warnings)
+    idf_id = feature_id(idf) if idf else None
+    if idf_id:
+        cable_values[idf_end] = idf_id
+
+
+def adopt_typed_id(plan: dict, field_map: dict, attributes: dict, kind: str) -> None:
+    """Keep ends, the circuit, and the mount aligned when the attribute form changes the id."""
+    id_field = (field_map or {}).get("id")
+    if not id_field or not attributes:
+        return
+    new_id = text_of(attributes.get(id_field))
+    bucket = "device_values" if kind == "device" else "cable_values"
+    values = plan.get(bucket) or {}
+    old = text_of(values.get("id"))
+    if not new_id or not old or new_id == old:
+        return
+    values["id"] = new_id
+    if text_of(values.get("name")) == old:
+        values["name"] = new_id
+        name_field = (field_map or {}).get("name")
+        if name_field and text_of(attributes.get(name_field)) == old:
+            attributes[name_field] = new_id
+    if kind == "device":
+        for edit in plan.get("edits") or []:
+            if text_of(edit.get("value")) == old and edit.get("canonical") in ("a_end", "z_end"):
+                edit["value"] = new_id
+    else:
+        for edit in plan.get("edits") or []:
+            if edit.get("canonical") == "cable_ref" and text_of(edit.get("value")) == old:
+                edit["value"] = new_id
+    circuit = plan.get("circuit")
+    if circuit:
+        if kind == "device" and text_of(circuit.get("device_id")) == old:
+            circuit["device_id"] = new_id
+        if kind == "cable" and text_of(circuit.get("cable_id")) == old:
+            circuit["cable_id"] = new_id
+        if circuit.get("device_id") and circuit.get("cable_id"):
+            circuit["circuit_id"] = f"ckt.{circuit['device_id']}.{circuit['cable_id']}"
+    mount = plan.get("mount")
+    if mount and text_of(mount.get("device_id")) == old:
+        mount["device_id"] = new_id
+        mount["mount_id"] = f"{mount.get('support_id')}.{new_id}"
 
 
 def _cable_media(cable: dict) -> str:
