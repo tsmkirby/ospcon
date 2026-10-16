@@ -1,0 +1,15 @@
+[general]
+name=OSP Connectivity
+qgisMinimumVersion=3.34
+description=Link outside plant cables, panels, ducts, and devices, then trace and splice them.
+version=0.1.0
+author=Ryan Kirby
+email=ryan.kirby@local
+about=Works with the OSP network template and with the live NCL project. Builds associations from the attributes each project already has, traces a path from a device or panel port, and splits a fiber cable where a splice enclosure is added.
+category=Vector
+icon=
+experimental=False
+deprecated=False
+tags=osp,fiber,network,cables
+server=False
+hasProcessingProvider=False
