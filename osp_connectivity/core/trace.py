@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from .catalog import DEVICE_ROLES, build_index, feature_id, resolve_end
 from .fields import media_of, parse_count, text_of
+from .handholes import handholes_on_cables
 from .strands import compress_splices, strand_numbers_for
 
 
-def trace_selection(selected: list[dict], features: list[dict], tables: dict) -> dict:
+def cables_for_device(device: dict, features: list[dict], index: dict) -> list[dict]:
+    return _cables_for_device(device, features, index)
+
+
+def trace_selection(selected: list[dict], features: list[dict], tables: dict, tolerance: float = 1.0) -> dict:
     devices = [feature for feature in selected if feature.get("role") in DEVICE_ROLES]
     cables = [feature for feature in selected if feature.get("role") == "cable"]
     anchors = [feature for feature in selected if feature.get("role") in ("idf", "patch_panel", "fdp")]
@@ -32,11 +37,11 @@ def trace_selection(selected: list[dict], features: list[dict], tables: dict) ->
     warnings = []
     for target in targets:
         if kind == "device":
-            pieces = _trace_device(target, features, tables)
+            pieces = _trace_device(target, features, tables, tolerance)
         elif kind == "cable":
-            pieces = _trace_cable(target, features, tables)
+            pieces = _trace_cable(target, features, tables, tolerance)
         else:
-            pieces = _trace_anchor(target, features, tables)
+            pieces = _trace_anchor(target, features, tables, tolerance)
         for piece in pieces:
             reports.append(piece)
             _merge_highlights(highlights, piece.get("highlights") or _empty_highlights())
@@ -70,6 +75,8 @@ def _format_one(report: dict) -> str:
         lines.append("Enclosures: " + ", ".join(report["enclosures"]))
     if report.get("ducts"):
         lines.append("Ducts: " + " > ".join(report["ducts"]))
+    if report.get("handholes"):
+        lines.append("Handholes: " + " > ".join(report["handholes"]))
     if report.get("idf_id"):
         lines.append(f"IDF: {report['idf_id']}")
     if report.get("panel_id") or report.get("panel_port"):
@@ -83,7 +90,7 @@ def _format_one(report: dict) -> str:
 
 
 def _empty_highlights() -> dict:
-    return {"cables": [], "devices": [], "idfs": [], "enclosures": []}
+    return {"cables": [], "devices": [], "idfs": [], "enclosures": [], "handholes": []}
 
 
 def _merge_highlights(target: dict, extra: dict) -> None:
@@ -93,7 +100,7 @@ def _merge_highlights(target: dict, extra: dict) -> None:
                 target[key].append(item)
 
 
-def _trace_device(device: dict, features: list[dict], tables: dict) -> list[dict]:
+def _trace_device(device: dict, features: list[dict], tables: dict, tolerance: float = 1.0) -> list[dict]:
     index = build_index(features)
     identifier = feature_id(device)
     circuits = [
@@ -102,7 +109,7 @@ def _trace_device(device: dict, features: list[dict], tables: dict) -> list[dict
         if text_of(row.get("device_id")) and text_of(row.get("device_id")).casefold() == (identifier or "").casefold()
     ]
     if circuits:
-        return [_report_from_circuit(device, row, features, tables, index) for row in circuits]
+        return [_report_from_circuit(device, row, features, tables, index, tolerance) for row in circuits]
 
     cables = _cables_for_device(device, features, index)
     if not cables:
@@ -115,13 +122,14 @@ def _trace_device(device: dict, features: list[dict], tables: dict) -> list[dict
                     "devices": [_ref(device)],
                     "idfs": [],
                     "enclosures": [],
+                    "handholes": [],
                 },
             }
         ]
-    return [_report_from_cable(device, cable, None, features, tables, index) for cable in cables]
+    return [_report_from_cable(device, cable, None, features, tables, index, tolerance) for cable in cables]
 
 
-def _trace_cable(cable: dict, features: list[dict], tables: dict) -> list[dict]:
+def _trace_cable(cable: dict, features: list[dict], tables: dict, tolerance: float = 1.0) -> list[dict]:
     index = build_index(features)
     identifier = feature_id(cable)
     devices = []
@@ -137,11 +145,11 @@ def _trace_cable(cable: dict, features: list[dict], tables: dict) -> list[dict]:
             if hit.get("role") in DEVICE_ROLES and hit not in devices:
                 devices.append(hit)
     if devices:
-        return [_report_from_cable(device, cable, None, features, tables, index) for device in devices]
-    return [_report_from_cable(None, cable, None, features, tables, index)]
+        return [_report_from_cable(device, cable, None, features, tables, index, tolerance) for device in devices]
+    return [_report_from_cable(None, cable, None, features, tables, index, tolerance)]
 
 
-def _trace_anchor(anchor: dict, features: list[dict], tables: dict) -> list[dict]:
+def _trace_anchor(anchor: dict, features: list[dict], tables: dict, tolerance: float = 1.0) -> list[dict]:
     index = build_index(features)
     identifier = feature_id(anchor)
     reports = []
@@ -154,31 +162,31 @@ def _trace_anchor(anchor: dict, features: list[dict], tables: dict) -> list[dict
             for end_name in ("a_end", "z_end"):
                 ends.extend(resolve_end(index, values.get(end_name), cable))
             if any(feature_id(hit) == identifier and hit.get("role") == "idf" for hit in ends):
-                reports.extend(_trace_cable(cable, features, tables))
+                reports.extend(_trace_cable(cable, features, tables, tolerance))
     else:
         for row in tables.get("circuits") or []:
             if text_of(row.get("panel_id")) and text_of(row.get("panel_id")).casefold() == (identifier or "").casefold():
                 device = _find_id(features, row.get("device_id"), DEVICE_ROLES)
                 cable = _find_id(features, row.get("cable_id"), {"cable"})
                 if cable:
-                    reports.append(_report_from_cable(device, cable, row, features, tables, index))
+                    reports.append(_report_from_cable(device, cable, row, features, tables, index, tolerance))
     if not reports:
         return [{"warnings": [f"Nothing is terminated on {identifier}."], "highlights": _empty_highlights()}]
     return reports
 
 
-def _report_from_circuit(device, circuit, features, tables, index) -> dict:
+def _report_from_circuit(device, circuit, features, tables, index, tolerance: float = 1.0) -> dict:
     cable = _find_id(features, circuit.get("cable_id"), {"cable"}, circuit.get("cable_layer_id"))
     if cable is None:
         return {
             "device_id": feature_id(device),
             "warnings": [f"Circuit {circuit.get('circuit_id')} points at missing cable {circuit.get('cable_id')}."],
-            "highlights": {"cables": [], "devices": [_ref(device)], "idfs": [], "enclosures": []},
+            "highlights": {"cables": [], "devices": [_ref(device)] if device else [], "idfs": [], "enclosures": [], "handholes": []},
         }
-    return _report_from_cable(device, cable, circuit, features, tables, index)
+    return _report_from_cable(device, cable, circuit, features, tables, index, tolerance)
 
 
-def _report_from_cable(device, cable, circuit, features, tables, index) -> dict:
+def _report_from_cable(device, cable, circuit, features, tables, index, tolerance: float = 1.0) -> dict:
     warnings = []
     identifier = feature_id(cable)
     copies = [
@@ -276,11 +284,44 @@ def _report_from_cable(device, cable, circuit, features, tables, index) -> dict:
         enc = _find_id(features, enc_id, {"splice_enc"})
         if enc and _ref(enc) not in enclosure_refs:
             enclosure_refs.append(_ref(enc))
+    path_cables = [
+        feature
+        for feature in features
+        if feature.get("role") == "cable" and feature_id(feature) and feature_id(feature).casefold() in {item.casefold() for item in cable_ids}
+    ] or [cable]
+    handhole_features = handholes_on_cables(
+        path_cables,
+        [feature for feature in features if feature.get("role") == "handhole"],
+        tolerance,
+    )
+    stored_ids = []
+    for row in tables.get("handholes") or []:
+        if (text_of(row.get("cable_id")) or "").casefold() not in {item.casefold() for item in cable_ids}:
+            continue
+        identifier_text = text_of(row.get("handhole_id"))
+        if identifier_text and identifier_text not in stored_ids:
+            stored_ids.append(identifier_text)
+    handhole_ids = []
+    handhole_refs = []
+    for handhole in handhole_features:
+        name = feature_id(handhole)
+        if name and name not in handhole_ids:
+            handhole_ids.append(name)
+        ref = _ref(handhole)
+        if ref not in handhole_refs:
+            handhole_refs.append(ref)
+    for name in stored_ids:
+        if name not in handhole_ids:
+            handhole_ids.append(name)
+        found = _find_id(features, name, {"handhole"})
+        if found and _ref(found) not in handhole_refs:
+            handhole_refs.append(_ref(found))
     highlights = {
         "cables": highlighted or [_ref(cable)],
         "devices": [_ref(device)] if device else [],
         "idfs": [_ref(idf_hit)] if idf_hit else [],
         "enclosures": enclosure_refs,
+        "handholes": handhole_refs,
     }
     return {
         "device_id": feature_id(device) if device else None,
@@ -295,6 +336,7 @@ def _report_from_cable(device, cable, circuit, features, tables, index) -> dict:
         "strand_lines": strand_lines,
         "segments": cable_ids if len(cable_ids) > 1 else [],
         "enclosures": enclosure_ids,
+        "handholes": handhole_ids,
         "warnings": warnings,
         "highlights": highlights,
     }

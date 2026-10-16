@@ -28,6 +28,7 @@ TABLE_ROLES = {
     "fiber_termination",
     "copper_termination",
     "cable_route",
+    "cable_handhole",
     "mounted_device",
     "splice_enc_cable",
     "circuit",
@@ -37,6 +38,7 @@ GRAPH_ROLES = (
     "fiber_strand",
     "fiber_splice",
     "cable_route",
+    "cable_handhole",
     "circuit",
     "splice_enc",
     "splice_enc_cable",
@@ -124,11 +126,21 @@ def read_features(project: QgsProject, layers: dict, infos: list) -> list[dict]:
 
 
 def read_tables(layers: dict, infos: list) -> dict:
-    tables = {"circuits": [], "splices": [], "routes": [], "strands": [], "terminations": [], "mounts": [], "memberships": []}
+    tables = {
+        "circuits": [],
+        "splices": [],
+        "routes": [],
+        "strands": [],
+        "terminations": [],
+        "mounts": [],
+        "memberships": [],
+        "handholes": [],
+    }
     role_to_bucket = {
         "circuit": "circuits",
         "fiber_splice": "splices",
         "cable_route": "routes",
+        "cable_handhole": "handholes",
         "fiber_strand": "strands",
         "fiber_termination": "terminations",
         "copper_termination": "terminations",
@@ -143,7 +155,11 @@ def read_tables(layers: dict, infos: list) -> dict:
         if layer is None:
             continue
         for qgs_feature in layer.getFeatures():
-            tables[bucket].append({field.name(): plain(qgs_feature[field.name()]) for field in layer.fields()})
+            row = {field.name(): plain(qgs_feature[field.name()]) for field in layer.fields()}
+            if bucket in ("handholes", "circuits"):
+                row["_fid"] = qgs_feature.id()
+                row["_layer_id"] = info.layer_id
+            tables[bucket].append(row)
     return tables
 
 
@@ -217,8 +233,9 @@ def ensure_project(project: QgsProject, layers: dict, infos: list):
             store.setdefault(info.role, layers[info.layer_id])
 
     native_graph = "fiber_splice" in store or "copper_termination" in store
-    missing = [role for role in GRAPH_ROLES if role not in store]
-    if not missing:
+    missing = [role for role in GRAPH_ROLES if role not in store and role != "cable_handhole"]
+    need_handhole = "cable_handhole" not in store
+    if not missing and not need_handhole:
         _register_strand_relation(project, store, infos)
         return layers, infos, store
 
@@ -227,13 +244,19 @@ def ensure_project(project: QgsProject, layers: dict, infos: list):
         target = _cable_gpkg(layers, infos) or _sidecar_path(project)
     else:
         target = _sidecar_path(project)
-    if not target:
+    if missing and not target:
         raise RuntimeError("Save the QGIS project before building associations.")
 
     specs = _layer_specs(project)
     for role in missing:
         layer_name, title, wkb, fields = specs[role]
         _write_layer(project, target, layer_name, title, wkb, fields)
+    if need_handhole:
+        sidecar = _sidecar_path(project)
+        if not sidecar:
+            raise RuntimeError("Save the QGIS project before building associations.")
+        layer_name, title, wkb, fields = specs["cable_handhole"]
+        _write_layer(project, sidecar, layer_name, title, wkb, fields)
     layers, infos = scan(project)
     store = {}
     for info in infos:
@@ -260,6 +283,32 @@ def apply_edits(session: EditSession, layers: dict, infos: list, edits: list) ->
         session.edit(layer)
         layer.changeAttributeValue(edit.fid, index, edit.value)
     return skipped
+
+
+def delete_features(session: EditSession, layers: dict, pairs: list) -> None:
+    grouped = {}
+    for layer_id, fid in pairs:
+        if layer_id is None or fid is None:
+            continue
+        grouped.setdefault(layer_id, []).append(fid)
+    for layer_id, fids in grouped.items():
+        layer = layers.get(layer_id)
+        if layer is None or not fids:
+            continue
+        session.edit(layer)
+        layer.deleteFeatures(fids)
+
+
+def update_feature_fields(session: EditSession, layers: dict, updates: list) -> None:
+    for update in updates:
+        layer = layers.get(update.get("layer_id"))
+        if layer is None or update.get("fid") is None:
+            continue
+        session.edit(layer)
+        for name, value in (update.get("values") or {}).items():
+            index = layer.fields().indexFromName(name)
+            if index >= 0:
+                layer.changeAttributeValue(update["fid"], index, value)
 
 
 def apply_inserts(session: EditSession, store: dict, inserts: list) -> int:
@@ -573,6 +622,14 @@ def _layer_specs(project: QgsProject):
         text("segment_id"),
         integer("route_order"),
     ]
+    handhole_fields = [
+        text("cable_source_layer_id"),
+        text("cable_id"),
+        text("handhole_layer_id"),
+        integer("handhole_fid"),
+        text("handhole_id"),
+        integer("route_order"),
+    ]
     circuit_fields = [
         text("circuit_id"),
         text("media_type"),
@@ -604,6 +661,7 @@ def _layer_specs(project: QgsProject):
         "fiber_strand": ("osp_fiber_strands", "OSP Fiber Strands", "None", strand_fields),
         "fiber_splice": ("osp_fiber_splices", "OSP Fiber Splices", "None", splice_fields),
         "cable_route": ("osp_cable_routes", "OSP Cable Routes", "None", route_fields),
+        "cable_handhole": ("osp_cable_handholes", "OSP Cable Handholes", "None", handhole_fields),
         "circuit": ("osp_circuits", "OSP Circuits", "None", circuit_fields),
         "splice_enc": ("osp_splice_enc", "OSP Splice Enclosures", "Point", enclosure_fields),
         "splice_enc_cable": ("osp_splice_enc_cables", "OSP Enclosure Cables", "None", membership_fields),

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .catalog import DEVICE_ROLES, build_index, end_convention, feature_id
+from .catalog import DEVICE_ROLES, build_index, end_convention, feature_id, resolve_end
 from .fields import media_of, ranges_overlap, text_of
 from .geometry import chain_segments
+from .handholes import handhole_rows, handholes_on_cables
 from .panels import new_panel_request, panel_feature_ids, panels_for
 from .strands import strand_numbers_for
+from .trace import cables_for_device
 
 
 @dataclass
@@ -26,6 +28,8 @@ class AssociationProposal:
     panels: list[str] = field(default_factory=list)
     panels_by_idf: dict = field(default_factory=dict)
     panel_feature_ids: list = field(default_factory=list)
+    handholes: list = field(default_factory=list)
+    tolerance: float = 1.0
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -73,6 +77,12 @@ def propose(selected: list[dict], project_features: list[dict], tolerance: float
     )
     panels_by_idf = {feature_id(idf) or "": panels_for([feature_id(idf) or ""], project_features, index) for idf in idfs}
     panels = panels_by_idf.get(feature_id(idfs[0]) or "", []) if idfs else panels_for([], project_features, index)
+    project_handholes = [feature for feature in project_features if feature.get("role") == "handhole"]
+    selected_handholes = [feature for feature in selected if feature.get("role") == "handhole"]
+    along = handholes_on_cables(ordered_cables, project_handholes, tolerance)
+    for handhole in selected_handholes:
+        if not _same(handhole, along):
+            along.append(handhole)
     return AssociationProposal(
         cables=ordered_cables,
         devices=devices,
@@ -87,8 +97,122 @@ def propose(selected: list[dict], project_features: list[dict], tolerance: float
         panels=panels,
         panels_by_idf=panels_by_idf,
         panel_feature_ids=panel_feature_ids(project_features),
+        handholes=along,
+        tolerance=tolerance,
         warnings=warnings,
     )
+
+
+def device_association(device: dict, features: list[dict], tables: dict, tolerance: float = 1.0) -> dict:
+    """Everything currently tied to one device, including handholes on its cable."""
+    index = build_index(features)
+    cables = cables_for_device(device, features, index)
+    warnings = []
+    if not cables:
+        warnings.append(f"{feature_id(device) or 'The device'} has no cable.")
+    candidates = [feature for feature in features if feature.get("role") == "handhole"]
+    along = handholes_on_cables(cables, candidates, tolerance)
+    stored = _stored_handhole_ids(cables, tables.get("handholes") or [])
+    if stored:
+        for handhole in candidates:
+            identifier = (feature_id(handhole) or "").casefold()
+            if identifier in stored and not _same(handhole, along):
+                along.append(handhole)
+        checked = [handhole for handhole in along if (feature_id(handhole) or "").casefold() in stored]
+    else:
+        checked = list(along)
+    idfs = []
+    panel = port = None
+    for cable in cables:
+        values = cable.get("values") or {}
+        for end_name in ("a_end", "z_end"):
+            for hit in resolve_end(index, values.get(end_name), cable):
+                if hit.get("role") == "idf" and not _same(hit, idfs):
+                    idfs.append(hit)
+        if panel is None:
+            panel, port = _panel_on_cable(values, feature_id(idfs[0]) if idfs else None)
+    if panel is None:
+        panel = text_of((device.get("values") or {}).get("panel"))
+        port = text_of((device.get("values") or {}).get("port"))
+    panels_by_idf = {feature_id(idf) or "": panels_for([feature_id(idf) or ""], features, index) for idf in idfs}
+    return {
+        "ready": bool(cables),
+        "device": device,
+        "cables": cables,
+        "idf": idfs[0] if idfs else None,
+        "idfs": idfs,
+        "panel": panel or "",
+        "port": port or "",
+        "media": media_of((cables[0].get("values") if cables else {}) or {}),
+        "handholes": along,
+        "checked": checked,
+        "panels_by_idf": panels_by_idf,
+        "panel_feature_ids": panel_feature_ids(features),
+        "tolerance": tolerance,
+        "circuit_rows": [
+            row
+            for row in tables.get("circuits") or []
+            if (text_of(row.get("device_id")) or "").casefold() == (feature_id(device) or "").casefold()
+        ],
+        "warnings": warnings,
+    }
+
+
+def modification_edits(association: dict, choices: dict, handhole_rows_now: list[dict]) -> dict:
+    """Overwrite the panel, port, and handhole list for a device the user is editing."""
+    device = association.get("device")
+    cables = association.get("cables") or []
+    idf = association.get("idf")
+    wanted = text_of(choices.get("idf_id"))
+    if wanted:
+        idf = next((item for item in association.get("idfs") or [] if feature_id(item) == wanted), idf)
+    panel = text_of(choices.get("panel_id"))
+    port = text_of(choices.get("port"))
+    idf_id = feature_id(idf) if idf else None
+    edits = []
+    for cable in cables:
+        end_name = _idf_end(cable, idf_id)
+        if not end_name or not panel:
+            continue
+        panel_field = "a_panel" if end_name == "a_end" else "z_panel"
+        port_field = "a_port" if end_name == "a_end" else "z_port"
+        edits.append(_field_edit(cable, panel_field, panel))
+        if port:
+            edits.append(_field_edit(cable, port_field, port))
+    if device and panel:
+        edits.append(_field_edit(device, "panel", panel))
+    if device and port:
+        edits.append(_field_edit(device, "port", port))
+    chosen = choices.get("handholes") or []
+    rows = handhole_rows(cables, chosen, association.get("tolerance") or 1)
+    cable_ids = {(feature_id(cable) or "").casefold() for cable in cables}
+    delete = []
+    for row in handhole_rows_now:
+        if (text_of(row.get("cable_id")) or "").casefold() not in cable_ids:
+            continue
+        if row.get("_fid") is None:
+            continue
+        delete.append((row.get("_layer_id"), row.get("_fid")))
+    circuit_updates = []
+    for row in association.get("circuit_rows") or []:
+        if row.get("_fid") is None:
+            continue
+        values = {"panel_id": panel, "panel_port": port}
+        if association.get("media") == "fiber" and text_of(choices.get("strands")):
+            numbers = strand_numbers_for({"port": choices.get("strands")})
+            if numbers:
+                values["strand_from"] = numbers[0]
+                values["strand_to"] = numbers[-1]
+        circuit_updates.append({"layer_id": row.get("_layer_id"), "fid": row.get("_fid"), "values": values})
+    return {
+        "edits": edits,
+        "handholes": rows,
+        "delete": delete,
+        "circuit_updates": circuit_updates,
+        "new_panel": new_panel_request(panel, idf, association.get("media") or "copper", association.get("panel_feature_ids") or [])
+        if idf
+        else None,
+    }
 
 
 def occupied_ports(features: list[dict], terminations: list[dict]) -> list[tuple[str, str]]:
@@ -241,11 +365,60 @@ def assignment_edits(proposal: AssociationProposal, choices: dict) -> dict:
             "status": text_of((served.get("values") or {}).get("status")) or "proposed",
         }
 
+    chosen_handholes = choices.get("handholes")
+    if chosen_handholes is None:
+        chosen_handholes = list(proposal.handholes)
     return {
         "edits": edits,
         "circuit": circuit,
         "routes": routes,
+        "handholes": handhole_rows(proposal.cables, chosen_handholes, proposal.tolerance),
         "mount": mount,
         "new_panel": new_panel_request(panel, idf, proposal.media, proposal.panel_feature_ids) if idf else None,
         "warnings": warnings,
+    }
+
+
+def _same(feature: dict, features: list) -> bool:
+    return any(item.get("layer_id") == feature.get("layer_id") and item.get("fid") == feature.get("fid") for item in features)
+
+
+def _stored_handhole_ids(cables: list[dict], rows: list[dict]) -> set[str]:
+    cable_ids = {(feature_id(cable) or "").casefold() for cable in cables}
+    found = set()
+    for row in rows:
+        if (text_of(row.get("cable_id")) or "").casefold() not in cable_ids:
+            continue
+        identifier = text_of(row.get("handhole_id"))
+        if identifier:
+            found.add(identifier.casefold())
+    return found
+
+
+def _panel_on_cable(values: dict, idf_id: str | None) -> tuple:
+    end_name = _idf_end({"values": values}, idf_id)
+    if end_name == "a_end":
+        return text_of(values.get("a_panel")), text_of(values.get("a_port"))
+    if end_name == "z_end":
+        return text_of(values.get("z_panel")), text_of(values.get("z_port"))
+    return text_of(values.get("a_panel")) or text_of(values.get("z_panel")), text_of(values.get("a_port")) or text_of(values.get("z_port"))
+
+
+def _idf_end(cable: dict, idf_id: str | None) -> str | None:
+    if not idf_id:
+        return None
+    values = cable.get("values") or {}
+    wanted = idf_id.casefold()
+    for end_name in ("a_end", "z_end"):
+        if (text_of(values.get(end_name)) or "").casefold() == wanted:
+            return end_name
+    return None
+
+
+def _field_edit(feature: dict, canonical: str, value: str) -> dict:
+    return {
+        "layer_id": feature.get("layer_id"),
+        "fid": feature.get("fid"),
+        "canonical": canonical,
+        "value": value,
     }

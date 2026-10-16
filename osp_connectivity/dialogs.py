@@ -104,6 +104,18 @@ class AssociateDialog(QDialog):
         buttons.addWidget(down)
         layout.addLayout(buttons)
 
+        layout.addWidget(QLabel("Handholes on this cable"))
+        self.handholes = QListWidget()
+        for handhole in proposal.handholes:
+            label = feature_id(handhole) or f"fid {handhole.get('fid')}"
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setData(Qt.UserRole, handhole)
+            self.handholes.addItem(item)
+        self.handholes.setVisible(bool(proposal.handholes))
+        layout.addWidget(self.handholes)
+
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.accepted.connect(self._accept)
         box.rejected.connect(self.reject)
@@ -139,6 +151,11 @@ class AssociateDialog(QDialog):
         for row in range(self.ducts.count()):
             ducts.append(self.ducts.item(row).data(Qt.UserRole))
         self.proposal.ducts = ducts
+        handholes = []
+        for row in range(self.handholes.count()):
+            item = self.handholes.item(row)
+            if item.checkState() == Qt.Checked:
+                handholes.append(item.data(Qt.UserRole))
         return {
             "a_role": self.a_end.currentText(),
             "z_role": self.z_end.currentText(),
@@ -146,6 +163,7 @@ class AssociateDialog(QDialog):
             "panel_id": self.panel.currentText().strip(),
             "port": self.port.text().strip(),
             "strands": self.strands.text().strip(),
+            "handholes": handholes,
         }
 
     def _refill_panels(self) -> None:
@@ -284,6 +302,104 @@ class SpliceDialog(QDialog):
             "fusions": self._fusions(),
             "opens": self._open_ranges(),
             "prefix": self.prefix.text().strip(),
+        }
+
+
+class ModifyDialog(QDialog):
+    """Change the panel, port, and handholes already tied to one device."""
+
+    def __init__(self, association, occupied, parent=None):
+        super().__init__(parent)
+        self.association = association
+        self.occupied = occupied or []
+        device = feature_id(association.get("device")) or "device"
+        self.setWindowTitle("Modify associations")
+        self.resize(460, 560)
+        layout = QVBoxLayout(self)
+        cables = ", ".join(feature_id(item) or "?" for item in association.get("cables") or []) or "none"
+        layout.addWidget(QLabel(f"Device: {device}\nCables: {cables}"))
+        if association.get("warnings"):
+            layout.addWidget(QLabel("\n".join(association["warnings"])))
+        form = QFormLayout()
+        self.idf = QComboBox()
+        for item in association.get("idfs") or []:
+            self.idf.addItem(feature_id(item) or "", feature_id(item))
+        form.addRow("IDF", self.idf)
+        self.panel = QComboBox()
+        self.panel.setEditable(True)
+        form.addRow("Panel", self.panel)
+        self.port = QLineEdit(association.get("port") or "")
+        form.addRow("Port", self.port)
+        self.strands = QLineEdit()
+        self.strands.setPlaceholderText("1-2")
+        if association.get("media") == "fiber":
+            form.addRow("Fiber strands", self.strands)
+        layout.addLayout(form)
+        self._refill_panels()
+        self.idf.currentIndexChanged.connect(self._refill_panels)
+        if association.get("panel"):
+            self.panel.setCurrentText(association["panel"])
+        layout.addWidget(QLabel("Handholes"))
+        self.handholes = QListWidget()
+        checked = {
+            (item.get("layer_id"), item.get("fid"))
+            for item in association.get("checked") or []
+        }
+        for handhole in association.get("handholes") or []:
+            label = feature_id(handhole) or f"fid {handhole.get('fid')}"
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if (handhole.get("layer_id"), handhole.get("fid")) in checked else Qt.Unchecked)
+            item.setData(Qt.UserRole, handhole)
+            self.handholes.addItem(item)
+        layout.addWidget(self.handholes)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        if not association.get("ready"):
+            buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+        layout.addWidget(buttons)
+
+    def _refill_panels(self) -> None:
+        current = self.panel.currentText().strip()
+        idf_id = self.idf.currentData() or self.idf.currentText()
+        names = (self.association.get("panels_by_idf") or {}).get(idf_id) or []
+        self.panel.blockSignals(True)
+        self.panel.clear()
+        for name in names:
+            self.panel.addItem(name)
+        if current:
+            self.panel.setCurrentText(current)
+        elif self.association.get("panel"):
+            self.panel.setCurrentText(self.association["panel"])
+        self.panel.blockSignals(False)
+
+    def _accept(self) -> None:
+        panel = self.panel.currentText().strip()
+        port = self.port.text().strip()
+        if self.association.get("idfs") and (not panel or not port):
+            QMessageBox.warning(self, "Modify associations", "Enter the panel and the port.")
+            return
+        if panel and port and port_in_use(self.occupied, panel, port):
+            QMessageBox.warning(self, "Modify associations", f"{panel} port {port} is already used.")
+            return
+        if self.association.get("media") == "fiber" and self.strands.text().strip() and not parse_range(self.strands.text()):
+            QMessageBox.warning(self, "Modify associations", "Enter the fiber strand numbers, such as 1-2.")
+            return
+        self.accept()
+
+    def choices(self) -> dict:
+        handholes = []
+        for row in range(self.handholes.count()):
+            item = self.handholes.item(row)
+            if item.checkState() == Qt.Checked:
+                handholes.append(item.data(Qt.UserRole))
+        return {
+            "idf_id": self.idf.currentData() or self.idf.currentText(),
+            "panel_id": self.panel.currentText().strip(),
+            "port": self.port.text().strip(),
+            "strands": self.strands.text().strip(),
+            "handholes": handholes,
         }
 
 

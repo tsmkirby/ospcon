@@ -14,14 +14,15 @@ COLUMNS = (
     "Cable type",
     "Length",
     "Ducts",
+    "Handholes",
     "IDF",
     "Panel",
     "Port",
-        "Strands",
-        "Segments",
-        "Enclosures",
-        "Warnings",
-    )
+    "Strands",
+    "Segments",
+    "Enclosures",
+    "Warnings",
+)
 
 _MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
@@ -35,6 +36,7 @@ def report_record(report: dict) -> dict:
         "Cable type": report.get("cable_type") or "",
         "Length": report.get("length") or "",
         "Ducts": " > ".join(report.get("ducts") or []),
+        "Handholes": " > ".join(report.get("handholes") or []),
         "IDF": report.get("idf_id") or "",
         "Panel": report.get("panel_id") or "",
         "Port": report.get("panel_port") or "",

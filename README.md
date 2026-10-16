@@ -38,7 +38,8 @@ The **OSP Connectivity** toolbar has these actions. Results open in the **OSP Re
 | Action | What it does |
 | --- | --- |
 | Build associations | Reads the open project and fills links that the attributes already imply. |
-| Associate selection | Builds one circuit from the features you have selected, then asks for the panel and port. |
+| Associate selection | Builds one circuit from the features you have selected, then asks for the panel and port. Handholes the cable passes through are included. |
+| Modify associations | Select one device. Change its panel, port, and handholes, then save. |
 | Trace selection | Follows the selected device, cable, or IDF and highlights the path. |
 | Add fiber enclosure | Click a fiber cable. The cable is split and you choose which strands are spliced. |
 | Add patch panel | Click an IDF. A copper cable gets a copper panel and a fiber cable gets a fiber panel, with the port and ends recorded in the dialog. |
@@ -62,6 +63,12 @@ Select the pieces of one path, then run **Associate selection**. A typical coppe
 
 The dialog will not save when no cable is selected, more than one device is selected, more than two IDFs are selected, copper and fiber are mixed, or the chosen port is already occupied.
 
+Handholes the selected cables pass through are listed and checked. Uncheck one to leave it out. The ones you keep are stored with the cable, in order along the run.
+
+### Modify associations
+
+Select one AP, camera, jack, or POS, then run **Modify associations**. The dialog lists that device’s cable, IDF, panel, port, and handholes. Change the panel or the port, check or uncheck handholes, and save. A panel name that is not already a feature is created on the IDF. This is an explicit edit, so the panel and port you enter replace the ones stored for that device.
+
 Duct segments are ordered by chaining their endpoints. If they do not form one chain, reorder them in the dialog before saving. Ducts that have no segment id are stored by layer and feature id. The plugin does not invent segment ids.
 
 ### Trace selection
@@ -72,13 +79,14 @@ Select an AP, camera, jack, cable, IDF, or panel, then run **Trace selection**. 
 - Pole, when the device is mounted on one
 - Cable id, cable type, and length
 - Ducts, in order, joined by `>`
+- Handholes the cable passes through, joined by `>`
 - IDF
 - Panel and port
 - Associated fiber segments, in connection order
 - Splice enclosures on that path
 - Fiber strands, compressed into ranges, including splice hops
 
-The map highlight uses orange for cables, blue for devices, green for IDFs, and magenta for splice enclosures. Duct banks are named in the report and are not highlighted. If the same cable id exists more than once, every copy is highlighted and the report says so.
+The map highlight uses orange for cables, blue for devices, green for IDFs, magenta for splice enclosures, and brown for handholes. Duct banks are named in the report and are not highlighted. If the same cable id exists more than once, every copy is highlighted and the report says so.
 
 Trace order is the selected device first, then a selected cable, then a selected IDF or panel. A panel-port trace walks the circuit back from that port.
 
@@ -86,7 +94,7 @@ Trace order is the selected device first, then a selected cable, then a selected
 
 **Export** in the OSP Report dock opens a dialog for the current trace. Check the circuits to include and the columns to write. The columns are always:
 
-Device, Pole, Cable, Cable type, Length, Ducts, IDF, Panel, Port, Strands, Segments, Enclosures, Warnings
+Device, Pole, Cable, Cable type, Length, Ducts, Handholes, IDF, Panel, Port, Strands, Segments, Enclosures, Warnings
 
 Create a new `.csv` or `.xlsx` file, or add the checked rows to a file you already have. Adding rows keeps the columns already in that file, including columns you added by hand, and appends any selected column that is not there yet. Trace another circuit later and add it to the same file. The column names do not change, so the sheet can grow into one table.
 
@@ -94,7 +102,9 @@ CSV files are UTF-8, which lets Excel on Windows keep the ids and strand text in
 
 ### Print a circuit card
 
-**Circuit card** in the OSP Report dock uses the current trace. Check the circuits to include. Each one becomes a page in a PDF: the device, the path from that device through the cable segments and enclosures to the panel and IDF, then the pole, cable, ducts, strands, and any warnings.
+**Circuit card** in the OSP Report dock uses the current trace. Check the circuits to include. Each one becomes a page in a PDF: the device, the path from that device through the cable, handholes, and enclosures to the panel and IDF, then the pole, cable, ducts, strands, and any warnings.
+
+The bottom of the first page is a map of the background layers and only the traced cable, device, IDF, enclosures, and handholes. Other plant stays off that map. When the project has no background layer, the map still draws those features.
 
 Save the PDF and print it from the viewer that opens. The card does not need a separate Python package.
 
@@ -144,6 +154,7 @@ When the project has none of those tables, the first **Build associations** or *
 | OSP Fiber Strands | One row per strand |
 | OSP Fiber Splices | Express, fusion, and open strand rows |
 | OSP Cable Routes | Cable to duct order |
+| OSP Cable Handholes | Handholes a cable passes through, in order |
 | OSP Circuits | Device, IDF, panel, port, and strand range |
 | OSP Splice Enclosures | The enclosure point |
 | OSP Enclosure Cables | Which cables enter the enclosure |

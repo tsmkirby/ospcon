@@ -2,7 +2,7 @@
 
 import unittest
 
-from osp_connectivity.core.associate import assignment_edits, port_in_use, propose
+from osp_connectivity.core.associate import assignment_edits, device_association, modification_edits, port_in_use, propose
 from osp_connectivity.core.catalog import build_index, end_convention
 from osp_connectivity.core.fields import enclosure_id, enclosure_id_from_prefix, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix
 from osp_connectivity.core.geometry import chain_segments, ducts_along_cable, split_linestring
@@ -51,6 +51,7 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(classify("None", ["cable_id", "strand_no", "tube_no"]), "fiber_strand")
         self.assertEqual(classify("None", ["a_cable_id", "a_strand_no", "b_cable_id", "b_strand_no"]), "fiber_splice")
         self.assertEqual(classify("None", ["cable_id", "segment_id", "route_order"]), "cable_route")
+        self.assertEqual(classify("None", ["cable_id", "handhole_id", "route_order"]), "cable_handhole")
 
         self.assertEqual(classify("Line", ["cable_id", "a_end_location", "z_end_location", "strand_count"]), "cable")
         self.assertEqual(classify("Line", ["segment_id", "conduit_capacity"]), "duct")
@@ -327,6 +328,31 @@ class AssociateAndTraceTests(unittest.TestCase):
         highlighted = {item[1] for item in result["highlights"]["cables"]}
         self.assertEqual(highlighted, {1, 2})
         self.assertEqual(result["highlights"]["enclosures"], [("enc", 8)])
+
+    def test_a_cable_associates_the_handhole_it_passes_through(self):
+        cable = feature("cable", 1, "CB-1", {"media": "copper", "a_end": "AP-1", "z_end": "IDF-1"}, coords=[(0, 0), (10, 0)])
+        device = feature("ap", 4, "AP-1", {"cable_ref": "CB-1"}, geometry="Point", coords=[(0, 0)])
+        idf = feature("idf", 2, "IDF-1", geometry="Point", coords=[(10, 0)])
+        near = feature("handhole", 7, "HH-1", geometry="Point", coords=[(5, 0.2)])
+        far = feature("handhole", 8, "HH-9", geometry="Point", coords=[(5, 30)])
+        features = [cable, device, idf, near, far]
+        proposal = propose([device, cable, idf], features, 1)
+        self.assertEqual([item["id"] for item in proposal.handholes], ["HH-1"])
+        result = assignment_edits(proposal, {"a_role": "device", "z_role": "idf", "idf_id": "IDF-1", "panel_id": "PP-1", "port": "4", "handholes": proposal.handholes})
+        self.assertEqual(result["handholes"][0]["handhole_id"], "HH-1")
+        self.assertEqual(result["handholes"][0]["route_order"], 1)
+        traced = trace_selection([device], features, {"routes": [], "splices": [], "circuits": [], "handholes": []}, 1)
+        self.assertIn("Handholes: HH-1", format_report(traced))
+        self.assertEqual(traced["highlights"]["handholes"], [("L", 7)])
+        association = device_association(device, features, {"handholes": [], "circuits": []}, 1)
+        changed = modification_edits(
+            association,
+            {"idf_id": "IDF-1", "panel_id": "PP-9", "port": "8", "handholes": [near]},
+            [{"cable_id": "CB-1", "handhole_id": "HH-1", "_fid": 3, "_layer_id": "links"}],
+        )
+        self.assertIn(("z_panel", "PP-9"), {(edit["canonical"], edit["value"]) for edit in changed["edits"]})
+        self.assertEqual(changed["delete"], [("links", 3)])
+        self.assertEqual(changed["handholes"][0]["handhole_id"], "HH-1")
 
     def test_panel_list_follows_the_idf_and_a_new_name_creates_one(self):
         idf_a = feature("idf", 1, "IDF-1", coords=[(0, 0)], geometry="Point", layer_id="idfs")

@@ -41,6 +41,8 @@ from .bridge import (
     apply_edits,
     apply_inserts,
     apply_plain_edits,
+    delete_features,
+    update_feature_fields,
     ensure_id_field,
     ensure_panel_layer,
     ensure_project,
@@ -50,7 +52,7 @@ from .bridge import (
     scan,
     split_cable,
 )
-from .core.associate import assignment_edits, occupied_ports, propose
+from .core.associate import assignment_edits, device_association, modification_edits, occupied_ports, propose
 from .core.cards import write_circuit_cards
 from .core.catalog import feature_id
 from .core.export import export_reports
@@ -75,7 +77,16 @@ from .core.place import (
 )
 from .core.strands import build_splice_rows
 from .core.trace import format_report, trace_selection
-from .dialogs import AssociateDialog, CircuitCardDialog, ExportDialog, PatchPanelDialog, PlacementDialog, SpliceDialog
+from .dialogs import (
+    AssociateDialog,
+    CircuitCardDialog,
+    ExportDialog,
+    ModifyDialog,
+    PatchPanelDialog,
+    PlacementDialog,
+    SpliceDialog,
+)
+from .mapimage import render_circuit_jpegs
 
 
 class SketchTool(QgsMapTool):
@@ -152,6 +163,7 @@ class OspConnectivityPlugin:
         self.toolbar.setObjectName("OspConnectivity")
         self._action("Build associations", self.build_associations)
         self._action("Associate selection", self.associate_selection)
+        self._action("Modify associations", self.modify_associations)
         self._action("Trace selection", self.trace_selection)
         self._action("Add fiber enclosure", self.start_enclosure)
         self._action("Add patch panel", self.start_panel)
@@ -205,6 +217,9 @@ class OspConnectivityPlugin:
 
     def associate_selection(self):
         self._run("Associate selection", self._associate)
+
+    def modify_associations(self):
+        self._run("Modify associations", self._modify)
 
     def trace_selection(self):
         self._run("Trace selection", self._trace)
@@ -306,6 +321,7 @@ class OspConnectivityPlugin:
                 inserts.append(RowInsert("circuit", result["circuit"], "circuit"))
             for route in result.get("routes") or []:
                 inserts.append(RowInsert("cable_route", route, "route"))
+            self._handhole_inserts(inserts, result.get("handholes") or [], tables)
             if result.get("mount"):
                 inserts.append(RowInsert("mounted_device", result["mount"], "mount"))
             self._termination_inserts(inserts, proposal, result, store)
@@ -335,7 +351,7 @@ class OspConnectivityPlugin:
         features = read_features(project, layers, infos)
         selected = self._selected(layers, features)
         tables = read_tables(layers, infos)
-        result = trace_selection(selected, features, tables)
+        result = trace_selection(selected, features, tables, self._tolerance(project))
         self._reports = list(result.get("reports") or [])
         self._show(format_report(result))
         self._highlight(layers, result.get("highlights") or {})
@@ -736,6 +752,7 @@ class OspConnectivityPlugin:
             "devices": (QgsWkbTypes.PointGeometry, QColor(20, 90, 200), 4),
             "idfs": (QgsWkbTypes.PolygonGeometry, QColor(20, 140, 60), 2),
             "enclosures": (QgsWkbTypes.PointGeometry, QColor(180, 30, 160), 4),
+            "handholes": (QgsWkbTypes.PointGeometry, QColor(140, 90, 20), 4),
         }
         bands = {}
         for key, (kind, color, width) in styles.items():
@@ -753,6 +770,8 @@ class OspConnectivityPlugin:
         idf_points.setWidth(4)
         self.bands.append(idf_points)
         for key, refs in highlights.items():
+            if key not in styles:
+                continue
             for layer_id, fid in refs:
                 layer = layers.get(layer_id)
                 if layer is None:
@@ -1085,9 +1104,88 @@ class OspConnectivityPlugin:
             return
         if not path.lower().endswith(".pdf"):
             path = f"{path}.pdf"
-        pages = write_circuit_cards(path, dialog.choices()["reports"])
+        reports = dialog.choices()["reports"]
+        images = self._circuit_images(reports)
+        pages = write_circuit_cards(path, reports, images)
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
         self.iface.messageBar().pushInfo("OSP Connectivity", f"Wrote {pages} circuit card page(s) in {path}.")
+
+    def _circuit_images(self, reports):
+        try:
+            project = QgsProject.instance()
+            _layers, infos = scan(project)
+            osp_ids = {info.layer_id for info in infos if info.role}
+            return render_circuit_jpegs(project, self.iface.mapCanvas(), reports, osp_ids)
+        except Exception:
+            QgsMessageLog.logMessage(traceback.format_exc(), "OSP Connectivity", Qgis.Warning)
+            self.iface.messageBar().pushWarning("OSP Connectivity", "The map image was left off the circuit card.")
+            return None
+
+    def _modify(self):
+        project = QgsProject.instance()
+        layers, infos = scan(project)
+        layers, infos, store = ensure_project(project, layers, infos)
+        features = read_features(project, layers, infos)
+        selected = [feature for feature in self._selected(layers, features) if feature.get("role") in ("ap", "cctv", "data_jack", "pos")]
+        if len(selected) != 1:
+            raise RuntimeError("Select one device, such as an AP.")
+        tables = read_tables(layers, infos)
+        association = device_association(selected[0], features, tables, self._tolerance(project))
+        if not association["ready"]:
+            raise RuntimeError("\n".join(association["warnings"]) or "That device has no associations to change.")
+        current_panel = (association.get("panel") or "").casefold()
+        current_port = (association.get("port") or "").casefold()
+        occupied = [
+            pair
+            for pair in occupied_ports(features, tables.get("terminations") or [])
+            if not (pair[0].casefold() == current_panel and pair[1].casefold() == current_port)
+        ]
+        dialog = ModifyDialog(association, occupied, self.iface.mainWindow())
+        if dialog.exec_() != dialog.Accepted:
+            return
+        result = modification_edits(association, dialog.choices(), tables.get("handholes") or [])
+        session = EditSession()
+        try:
+            delete_features(session, layers, result.get("delete") or [])
+            skipped = apply_plain_edits(session, layers, infos, result["edits"])
+            inserts = []
+            self._handhole_inserts(inserts, result.get("handholes") or [], {"handholes": []})
+            apply_inserts(session, store, inserts)
+            update_feature_fields(session, layers, result.get("circuit_updates") or [])
+            panel_note = self._create_panel(session, project, layers, infos, result.get("new_panel"))
+            errors = session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        if errors:
+            raise RuntimeError("\n".join(errors))
+        lines = [f"{feature_id(selected[0])} associations were updated."]
+        if panel_note:
+            lines.append(panel_note)
+        handholes = [row.get("handhole_id") for row in result.get("handholes") or [] if row.get("handhole_id")]
+        if handholes:
+            lines.append("Handholes: " + " > ".join(dict.fromkeys(handholes)))
+        for note in skipped:
+            lines.append(f"Skipped field: {note}")
+        lines.append("Save layer edits to keep this. Undo reverses it until then.")
+        self._show("\n".join(lines))
+        self.iface.mapCanvas().refresh()
+
+    def _handhole_inserts(self, inserts, rows, tables) -> None:
+        existing = set()
+        for row in tables.get("handholes") or []:
+            cable_id = text_of(row.get("cable_id"))
+            handhole_id = text_of(row.get("handhole_id"))
+            if cable_id and handhole_id:
+                existing.add((cable_id.casefold(), handhole_id.casefold()))
+        for row in rows:
+            cable_id = text_of(row.get("cable_id"))
+            handhole_id = text_of(row.get("handhole_id"))
+            key = ((cable_id or "").casefold(), (handhole_id or "").casefold())
+            if key in existing:
+                continue
+            existing.add(key)
+            inserts.append(RowInsert("cable_handhole", row, "cable_handhole"))
 
     def _run(self, title, function) -> None:
         try:

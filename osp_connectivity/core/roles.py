@@ -31,6 +31,8 @@ def classify(geometry_type: str, field_names: Iterable[str]) -> Optional[str]:
             return "fiber_strand"
         if "pp_id" in names and ("panel_port" in names or "cable_id" in names):
             return "copper_termination"
+        if "handhole_id" in names and "cable_id" in names:
+            return "cable_handhole"
         if "route_order" in names and "cable_id" in names:
             return "cable_route"
         if "support_id" in names and "device_id" in names:

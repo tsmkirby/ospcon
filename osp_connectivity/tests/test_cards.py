@@ -43,7 +43,7 @@ class CircuitCardTests(unittest.TestCase):
         ]
         result = trace_selection([ap], [cable, ap, idf, pole], {"routes": routes, "splices": [], "circuits": []})
         pages = circuit_card_pages(result["reports"])
-        text = "\n".join(block["text"] for block in pages[0])
+        text = "\n".join(block["text"] for block in pages[0]["blocks"])
         self.assertIn("OSP CIRCUIT CARD", text)
         self.assertIn("VIB-AP-0004", text)
         self.assertIn("VIB-PL-0002", text)
@@ -78,9 +78,9 @@ class CircuitCardTests(unittest.TestCase):
         }
         pages = circuit_card_pages([report])
         self.assertGreater(len(pages), 1)
-        continued = "\n".join(block["text"] for block in pages[1])
+        continued = "\n".join(block["text"] for block in pages[1]["blocks"])
         self.assertIn("AP-1 (continued)", continued)
-        self.assertIn("strand 79", "\n".join(block["text"] for page in pages for block in page))
+        self.assertIn("strand 79", "\n".join(block["text"] for page in pages for block in page["blocks"]))
 
     def test_empty_selection_is_rejected(self):
         with self.assertRaises(ValueError):
