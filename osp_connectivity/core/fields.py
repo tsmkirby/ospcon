@@ -96,7 +96,7 @@ _ID_CANDIDATES = {
     "pos": ["pos_id", "device_id"],
     "idf": ["idf_id", "mdf_idf_id"],
     "structure": ["support_id", "structure_id"],
-    "handhole": ["access_id", "structure_id", "structure_name"],
+    "handhole": ["access_id", "structure_id", "structure_name", "access_name"],
     "patch_panel": ["pp_id"],
     "fdp": ["fdp_id"],
     "splice_enc": ["splice_enc_id"],

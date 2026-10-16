@@ -63,11 +63,13 @@ Select the pieces of one path, then run **Associate selection**. A typical coppe
 
 The dialog will not save when no cable is selected, more than one device is selected, more than two IDFs are selected, copper and fiber are mixed, or the chosen port is already occupied.
 
-Handholes the selected cables pass through are listed and checked. Uncheck one to leave it out. The ones you keep are stored with the cable, in order along the run.
+Handholes the selected cables pass through are listed and checked. Each one is shown by its access id, or by its access name when the access id is blank. Uncheck one to leave it out. The ones you keep are stored with the cable, in order along the run.
 
 ### Modify associations
 
 Select one AP, camera, jack, or POS, then run **Modify associations**. The dialog lists that device’s cable, IDF, panel, port, and handholes. Change the panel or the port, check or uncheck handholes, and save. A panel name that is not already a feature is created on the IDF. This is an explicit edit, so the panel and port you enter replace the ones stored for that device.
+
+Select one fiber enclosure instead, and the same tool opens the enclosure splice dialog. Cables that already end there stay expressed on the same strand numbers. A fiber cable drawn to the enclosure, and not yet associated, is listed as a new cable. Add a fusion row to splice it, then save. The cable is linked to the enclosure and its nearer blank end is labeled with the enclosure id.
 
 Duct segments are ordered by chaining their endpoints. If they do not form one chain, reorder them in the dialog before saving. Ducts that have no segment id are stored by layer and feature id. The plugin does not invent segment ids.
 
@@ -79,7 +81,7 @@ Select an AP, camera, jack, cable, IDF, or panel, then run **Trace selection**. 
 - Pole, when the device is mounted on one
 - Cable id, cable type, and length
 - Ducts, in order, joined by `>`
-- Handholes the cable passes through, joined by `>`
+- Handholes the cable passes through, joined by `>`, using each handhole's access id or access name
 - IDF
 - Panel and port
 - Associated fiber segments, in connection order

@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 from .catalog import feature_id
+from .fields import text_of
 from .geometry import closest_on_line
+
+
+def handhole_label(feature: dict) -> str | None:
+    """access_id when it is filled, otherwise access_name. Never the feature number."""
+    official = feature_id(feature)
+    if official:
+        return official
+    return text_of((feature.get("values") or {}).get("name"))
 
 
 def handholes_on_cables(cables: list[dict], handholes: list[dict], tolerance: float) -> list[dict]:
@@ -41,7 +50,7 @@ def handhole_rows(cables: list[dict], handholes: list[dict], tolerance: float) -
                     "cable_id": cable_id,
                     "handhole_layer_id": handhole.get("layer_id"),
                     "handhole_fid": handhole.get("fid"),
-                    "handhole_id": feature_id(handhole) or "",
+                    "handhole_id": handhole_label(handhole) or "",
                     "route_order": position,
                 }
             )

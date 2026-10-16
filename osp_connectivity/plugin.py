@@ -55,6 +55,7 @@ from .bridge import (
 from .core.associate import assignment_edits, device_association, modification_edits, occupied_ports, propose
 from .core.cards import write_circuit_cards
 from .core.catalog import feature_id
+from .core.enclosures import enclosure_association, enclosure_edits, enclosure_end_links
 from .core.export import export_reports
 from .core.fields import enclosure_id_from_prefix, media_of, next_id, parse_count, suggest_enclosure_prefix, text_of
 from .core.geometry import distance, split_linestring
@@ -935,17 +936,31 @@ class OspConnectivityPlugin:
             panel_feature_ids=panel_feature_ids(features),
             media=choice.get("media") or "copper",
         )
+        links = []
+        if (choice.get("media") or "copper") == "fiber":
+            links = enclosure_end_links(line, features, tolerance, choice["name"], choice["layer_id"])
+            for link in links:
+                if not plan["cable_values"].get(link["end"]):
+                    plan["cable_values"][link["end"]] = link["enclosure_id"]
         session = EditSession()
         try:
             add_mapped_feature(session, project, target, info, line, plan["cable_values"], "line")
             skipped = apply_plain_edits(session, layers, infos, plan["edits"])
             panel_note = self._create_panel(session, project, layers, infos, plan.get("new_panel"))
             self._store_circuit(session, store, plan.get("circuit"))
+            if links:
+                apply_inserts(
+                    session,
+                    store,
+                    [RowInsert("splice_enc_cable", link["membership"], "membership") for link in links],
+                )
             errors = session.commit()
         except Exception:
             session.rollback()
             raise
-        self._placement_report(choice["name"], plan, panel_note, skipped, errors)
+        names = ", ".join(link["enclosure_id"] for link in links)
+        extra = [f"Enclosure: {names}"] if names else None
+        self._placement_report(choice["name"], plan, panel_note, skipped, errors, extra)
 
     def _placement_context(self, cable, idfs, features, point, ask_media):
         if cable is None:
@@ -1014,10 +1029,12 @@ class OspConnectivityPlugin:
             return
         apply_inserts(session, store, [RowInsert("circuit", circuit, "circuit")])
 
-    def _placement_report(self, name, plan, panel_note, skipped, errors) -> None:
+    def _placement_report(self, name, plan, panel_note, skipped, errors, extra=None) -> None:
         if errors:
             raise RuntimeError("\n".join(errors))
         lines = [f"{name} was added."]
+        if extra:
+            lines.extend(extra)
         if plan.get("warnings"):
             lines.extend(f"Warning: {warning}" for warning in plan["warnings"])
         if panel_note:
@@ -1127,8 +1144,12 @@ class OspConnectivityPlugin:
         layers, infos, store = ensure_project(project, layers, infos)
         features = read_features(project, layers, infos)
         selected = [feature for feature in self._selected(layers, features) if feature.get("role") in ("ap", "cctv", "data_jack", "pos")]
+        enclosures = [feature for feature in self._selected(layers, features) if feature.get("role") == "splice_enc"]
+        if len(enclosures) == 1 and not selected:
+            self._modify_enclosure(project, layers, infos, store, features, enclosures[0])
+            return
         if len(selected) != 1:
-            raise RuntimeError("Select one device, such as an AP.")
+            raise RuntimeError("Select one device, or one fiber enclosure.")
         tables = read_tables(layers, infos)
         association = device_association(selected[0], features, tables, self._tolerance(project))
         if not association["ready"]:
@@ -1165,6 +1186,59 @@ class OspConnectivityPlugin:
         handholes = [row.get("handhole_id") for row in result.get("handholes") or [] if row.get("handhole_id")]
         if handholes:
             lines.append("Handholes: " + " > ".join(dict.fromkeys(handholes)))
+        for note in skipped:
+            lines.append(f"Skipped field: {note}")
+        lines.append("Save layer edits to keep this. Undo reverses it until then.")
+        self._show("\n".join(lines))
+        self.iface.mapCanvas().refresh()
+
+    def _modify_enclosure(self, project, layers, infos, store, features, enclosure) -> None:
+        tables = read_tables(layers, infos)
+        association = enclosure_association(enclosure, features, tables, self._tolerance(project))
+        if not association["from_cable"]:
+            raise RuntimeError("No fiber cable ends at this enclosure.")
+        enc_id = feature_id(enclosure) or "enclosure"
+        choices = None
+        if association["targets"]:
+            new_ids = [feature_id(item) for item in association["unadded"] if feature_id(item)]
+            note = f"Enclosure {enc_id}."
+            if new_ids:
+                note += " New cable at this enclosure: " + ", ".join(new_ids) + ". Add a fusion row to splice it."
+            dialog = SpliceDialog(
+                association["strand_count"],
+                feature_id(association["from_cable"]) or "",
+                association["targets"],
+                self.iface.mainWindow(),
+                prefix=enc_id,
+                prefix_enabled=False,
+                title="Modify fiber enclosure",
+                prefix_label="Enclosure",
+                note=note,
+                initial_fusions=association["fusions"],
+                initial_opens=association["opens"],
+            )
+            if dialog.exec_() != dialog.Accepted:
+                return
+            choices = dialog.result_edits()
+        result = enclosure_edits(association, choices, tables)
+        session = EditSession()
+        try:
+            delete_features(session, layers, result.get("delete") or [])
+            skipped = apply_plain_edits(session, layers, infos, result.get("edits") or [])
+            inserts = [RowInsert("splice_enc_cable", row, "membership") for row in result.get("memberships") or []]
+            inserts.extend(RowInsert("fiber_splice", row, "splice") for row in result.get("splices") or [])
+            inserts.extend(RowInsert("fiber_strand", row, "strand") for row in result.get("strands") or [])
+            apply_inserts(session, store, inserts)
+            errors = session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        if errors:
+            raise RuntimeError("\n".join(errors))
+        lines = [f"{enc_id} associations were updated."]
+        added = [feature_id(item) for item in association["unadded"] if feature_id(item)]
+        if added:
+            lines.append("Added cables: " + ", ".join(added))
         for note in skipped:
             lines.append(f"Skipped field: {note}")
         lines.append("Save layer edits to keep this. Undo reverses it until then.")

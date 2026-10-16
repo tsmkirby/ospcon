@@ -25,6 +25,7 @@ from qgis.PyQt.QtWidgets import (
 
 from .core.associate import port_in_use
 from .core.catalog import feature_id
+from .core.handholes import handhole_label
 from .core.export import COLUMNS, item_label
 from .core.fields import parse_count, parse_range
 from .core.place import name_taken
@@ -107,13 +108,15 @@ class AssociateDialog(QDialog):
         layout.addWidget(QLabel("Handholes on this cable"))
         self.handholes = QListWidget()
         for handhole in proposal.handholes:
-            label = feature_id(handhole) or f"fid {handhole.get('fid')}"
+            label = handhole_label(handhole)
+            if not label:
+                continue
             item = QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
             item.setData(Qt.UserRole, handhole)
             self.handholes.addItem(item)
-        self.handholes.setVisible(bool(proposal.handholes))
+        self.handholes.setVisible(self.handholes.count() > 0)
         layout.addWidget(self.handholes)
 
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -180,11 +183,24 @@ class AssociateDialog(QDialog):
 
 
 class SpliceDialog(QDialog):
-    def __init__(self, strand_count: int, from_cable: str, targets: list[dict], parent=None, prefix: str = "OSP", prefix_enabled: bool = True):
+    def __init__(
+        self,
+        strand_count: int,
+        from_cable: str,
+        targets: list[dict],
+        parent=None,
+        prefix: str = "OSP",
+        prefix_enabled: bool = True,
+        title: str = "Fiber enclosure",
+        prefix_label: str = "Enclosure prefix",
+        note: str = "",
+        initial_fusions: list | None = None,
+        initial_opens: str = "",
+    ):
         super().__init__(parent)
         self.from_cable = from_cable
         self.targets = targets
-        self.setWindowTitle("Fiber enclosure")
+        self.setWindowTitle(title)
         self.resize(560, 500)
         layout = QVBoxLayout(self)
         layout.addWidget(
@@ -193,17 +209,21 @@ class SpliceDialog(QDialog):
                 "Add a fusion row only for the strands that are spliced to another cable."
             )
         )
+        if note:
+            notice = QLabel(note)
+            notice.setWordWrap(True)
+            layout.addWidget(notice)
         form = QFormLayout()
         self.prefix = QLineEdit(prefix or "OSP")
         self.prefix.setPlaceholderText("VIB")
         self.prefix.setEnabled(prefix_enabled)
-        form.addRow("Enclosure prefix", self.prefix)
+        form.addRow(prefix_label, self.prefix)
         self.count = QSpinBox()
         self.count.setRange(1, 864)
         self.count.setValue(max(1, strand_count or 1))
         self.count.valueChanged.connect(self._preview)
         form.addRow("Strand count", self.count)
-        self.opens = QLineEdit()
+        self.opens = QLineEdit(initial_opens or "")
         self.opens.setPlaceholderText("Optional open ranges, such as 10-12")
         self.opens.textChanged.connect(self._preview)
         form.addRow("Left open", self.opens)
@@ -224,7 +244,28 @@ class SpliceDialog(QDialog):
         box.accepted.connect(self._accept)
         box.rejected.connect(self.reject)
         layout.addWidget(box)
+        self._load_fusions(initial_fusions or [])
         self._preview()
+
+    def _load_fusions(self, fusions: list[dict]) -> None:
+        self.table.blockSignals(True)
+        for fusion in fusions:
+            self._add_row()
+            row = self.table.rowCount() - 1
+            self.table.item(row, 0).setText(str(fusion.get("a_from") or ""))
+            self.table.item(row, 1).setText(str(fusion.get("a_to") or ""))
+            self.table.item(row, 3).setText(str(fusion.get("b_start") or ""))
+            combo = self.table.cellWidget(row, 2)
+            wanted = str(fusion.get("b_cable_id") or "").casefold()
+            if combo is not None:
+                combo.blockSignals(True)
+                for index in range(combo.count()):
+                    data = combo.itemData(index)
+                    if data and str(data.get("id") or "").casefold() == wanted:
+                        combo.setCurrentIndex(index)
+                        break
+                combo.blockSignals(False)
+        self.table.blockSignals(False)
 
     def _add_row(self) -> None:
         row = self.table.rowCount()
@@ -233,7 +274,7 @@ class SpliceDialog(QDialog):
         self.table.setItem(row, 1, QTableWidgetItem("1"))
         combo = QComboBox()
         for target in self.targets:
-            combo.addItem(target["id"], target)
+            combo.addItem(target.get("label") or target["id"], target)
         combo.currentIndexChanged.connect(self._preview)
         self.table.setCellWidget(row, 2, combo)
         self.table.setItem(row, 3, QTableWidgetItem("1"))
@@ -346,7 +387,9 @@ class ModifyDialog(QDialog):
             for item in association.get("checked") or []
         }
         for handhole in association.get("handholes") or []:
-            label = feature_id(handhole) or f"fid {handhole.get('fid')}"
+            label = handhole_label(handhole)
+            if not label:
+                continue
             item = QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if (handhole.get("layer_id"), handhole.get("fid")) in checked else Qt.Unchecked)

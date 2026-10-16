@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .catalog import DEVICE_ROLES, build_index, feature_id, resolve_end
 from .fields import media_of, parse_count, text_of
-from .handholes import handholes_on_cables
+from .handholes import handhole_label, handholes_on_cables
 from .strands import compress_splices, strand_numbers_for
 
 
@@ -304,7 +304,7 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
     handhole_ids = []
     handhole_refs = []
     for handhole in handhole_features:
-        name = feature_id(handhole)
+        name = handhole_label(handhole)
         if name and name not in handhole_ids:
             handhole_ids.append(name)
         ref = _ref(handhole)

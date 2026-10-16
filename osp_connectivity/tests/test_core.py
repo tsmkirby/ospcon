@@ -3,6 +3,7 @@
 import unittest
 
 from osp_connectivity.core.associate import assignment_edits, device_association, modification_edits, port_in_use, propose
+from osp_connectivity.core.enclosures import enclosure_association, enclosure_edits, enclosure_end_links
 from osp_connectivity.core.catalog import build_index, end_convention
 from osp_connectivity.core.fields import enclosure_id, enclosure_id_from_prefix, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix
 from osp_connectivity.core.geometry import chain_segments, ducts_along_cable, split_linestring
@@ -353,6 +354,127 @@ class AssociateAndTraceTests(unittest.TestCase):
         self.assertIn(("z_panel", "PP-9"), {(edit["canonical"], edit["value"]) for edit in changed["edits"]})
         self.assertEqual(changed["delete"], [("links", 3)])
         self.assertEqual(changed["handholes"][0]["handhole_id"], "HH-1")
+
+    def test_handhole_report_uses_access_id_or_access_name(self):
+        cable = feature(
+            "cable",
+            1,
+            "CB-1",
+            {"media": "copper", "a_end": "AP-1"},
+            coords=[(0, 0), (10, 0)],
+        )
+        device = feature("ap", 4, "AP-1", {"cable_ref": "CB-1"}, geometry="Point", coords=[(0, 0)])
+        named = feature(
+            "handhole",
+            12,
+            None,
+            {"name": "CB-23"},
+            geometry="Point",
+            coords=[(4, 0.2)],
+        )
+        identified = feature(
+            "handhole",
+            13,
+            "HH-6",
+            {"name": "CB-24"},
+            geometry="Point",
+            coords=[(8, 0.1)],
+        )
+        traced = trace_selection(
+            [device],
+            [cable, device, named, identified],
+            {"routes": [], "splices": [], "circuits": [], "handholes": []},
+            1,
+        )
+        text = format_report(traced)
+        self.assertIn("Handholes: CB-23 > HH-6", text)
+        self.assertNotIn("fid", text.casefold())
+
+    def test_a_new_cable_at_an_enclosure_can_be_spliced(self):
+        enclosure = feature("splice_enc", 1, "OSP-EN-0001", coords=[(5, 0)], geometry="Point", layer_id="enc")
+        near = feature(
+            "cable",
+            2,
+            "CB-1",
+            {"media": "fiber", "strand_count": 4, "z_end": "OSP-EN-0001"},
+            coords=[(0, 0), (5, 0)],
+            layer_id="cables",
+        )
+        far = feature(
+            "cable",
+            3,
+            "CB-2",
+            {"media": "fiber", "strand_count": 4, "a_end": "OSP-EN-0001"},
+            coords=[(5, 0), (10, 0)],
+            layer_id="cables",
+        )
+        added = feature(
+            "cable",
+            4,
+            "CB-9",
+            {"media": "fiber", "strand_count": 4, "a_end": "OSP-EN-0001"},
+            coords=[(5, 0), (5, 8)],
+            layer_id="cables",
+        )
+        splices = [
+            {
+                "splice_enc_id": "OSP-EN-0001",
+                "a_cable_id": "CB-1",
+                "a_strand_no": number,
+                "b_cable_id": "CB-2",
+                "b_strand_no": number,
+                "splice_type": "EXPRESS",
+                "_fid": number,
+                "_layer_id": "splices",
+            }
+            for number in range(1, 5)
+        ]
+        tables = {
+            "memberships": [
+                {"splice_enc_id": "OSP-EN-0001", "cable_id": "CB-1"},
+                {"splice_enc_id": "OSP-EN-0001", "cable_id": "CB-2"},
+                {"splice_enc_id": "OSP-EN-0001", "cable_id": "CB-9"},
+            ],
+            "splices": splices,
+            "strands": [],
+        }
+        association = enclosure_association(enclosure, [enclosure, near, far, added], tables, 1)
+        self.assertEqual([item["id"] for item in association["unadded"]], ["CB-9"])
+        self.assertEqual(association["from_cable"]["id"], "CB-1")
+        self.assertEqual(association["targets"][0]["id"], "CB-2")
+        self.assertEqual(association["targets"][-1]["label"], "CB-9 (new)")
+        self.assertEqual(association["fusions"], [])
+        saved = enclosure_edits(
+            association,
+            {
+                "strand_count": 4,
+                "fusions": [{"a_from": 4, "a_to": 4, "b_cable_id": "CB-9", "b_layer_id": "cables", "b_start": 1}],
+                "opens": [],
+            },
+            tables,
+        )
+        pairs = {(row["a_strand_no"], row["b_cable_id"], row["splice_type"]) for row in saved["splices"]}
+        self.assertIn((1, "CB-2", "EXPRESS"), pairs)
+        self.assertIn((4, "CB-9", "FUSION"), pairs)
+        self.assertEqual(saved["memberships"], [])
+        self.assertEqual(saved["edits"], [])
+        self.assertEqual(saved["delete"], [("splices", 1), ("splices", 2), ("splices", 3), ("splices", 4)])
+        links = enclosure_end_links([(0, 0), (5, 0)], [enclosure], 1, "CB-8", "cables")
+        self.assertEqual(links[0]["end"], "z_end")
+        self.assertEqual(links[0]["membership"]["splice_enc_id"], "OSP-EN-0001")
+        loose = feature(
+            "cable",
+            5,
+            "CB-8",
+            {"media": "fiber"},
+            coords=[(0, 0), (5, 0)],
+            layer_id="cables",
+        )
+        loose_association = enclosure_association(enclosure, [enclosure, near, loose], {"memberships": [], "splices": [], "strands": []}, 1)
+        loose_saved = enclosure_edits(loose_association, None, {"memberships": [], "splices": [], "strands": []})
+        self.assertIn("CB-8", [item["id"] for item in loose_association["unadded"]])
+        self.assertIn(("z_end", "OSP-EN-0001"), {(edit["canonical"], edit["value"]) for edit in loose_saved["edits"]})
+        self.assertIn("CB-8", [row["cable_id"] for row in loose_saved["memberships"]])
 
     def test_panel_list_follows_the_idf_and_a_new_name_creates_one(self):
         idf_a = feature("idf", 1, "IDF-1", coords=[(0, 0)], geometry="Point", layer_id="idfs")

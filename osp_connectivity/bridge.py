@@ -156,7 +156,7 @@ def read_tables(layers: dict, infos: list) -> dict:
             continue
         for qgs_feature in layer.getFeatures():
             row = {field.name(): plain(qgs_feature[field.name()]) for field in layer.fields()}
-            if bucket in ("handholes", "circuits"):
+            if bucket in ("handholes", "circuits", "splices", "memberships"):
                 row["_fid"] = qgs_feature.id()
                 row["_layer_id"] = info.layer_id
             tables[bucket].append(row)
