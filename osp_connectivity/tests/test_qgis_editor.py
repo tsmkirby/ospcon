@@ -21,6 +21,38 @@ class QgisEditorTests(unittest.TestCase):
         cls.app = QgsApplication.instance() or QgsApplication([], False)
         cls.app.initQgis()
 
+    def test_earth_export_reports_empty_features_and_invalid_parts(self):
+        from qgis.core import QgsGeometry
+        from osp_connectivity.bridge import collect_earth_layers
+        from osp_connectivity.core.earth import build_kml, export_note, empty_export_message
+        project = QgsProject()
+        layer = QgsVectorLayer('MultiLineString?crs=EPSG:4326', 'Cables', 'memory')
+        project.addMapLayer(layer)
+        try:
+            for wkt in (
+                'MULTILINESTRING ((-76 39, -76.1 39.1), (-76 39))',
+                None,
+            ):
+                feature = QgsFeature(layer.fields())
+                if wkt:
+                    feature.setGeometry(QgsGeometry.fromWkt(wkt))
+                self.assertTrue(layer.dataProvider().addFeatures([feature])[0])
+            collected = collect_earth_layers(project, [layer.id()], False)
+            self.assertEqual(collected['skipped_geometry'], {'Cables': 1})
+            _, summary = build_kml(collected['layers'])
+            self.assertEqual(summary['features'], 1)
+            self.assertEqual(summary['rejected'], 1)
+            note = export_note(summary, collected)
+            self.assertIn('Cables (1)', note)
+            self.assertIn('Left out 1 feature part(s)', note)
+            empty_fid = list(layer.getFeatures())[1].id()
+            layer.selectByIds([empty_fid])
+            collected = collect_earth_layers(project, [layer.id()], True)
+            self.assertEqual(collected['layers'], [])
+            self.assertIn('Cables (1)', empty_export_message(collected, True))
+        finally:
+            project.removeAllMapLayers()
+
     def test_new_panels_and_switches_have_idf_scoped_keys_and_local_labels(self):
         from osp_connectivity.dialogs import PatchPanelDialog, SwitchDialog, PatchDialog
         from osp_connectivity.tests.test_core import feature

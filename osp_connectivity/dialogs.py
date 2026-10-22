@@ -622,6 +622,59 @@ class ExportDialog(QDialog):
         self.accept()
 
 
+class EarthExportDialog(QDialog):
+    """Choose which map layers are written to a KMZ for Google Earth on the web."""
+
+    def __init__(self, choices, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export for Google Earth")
+        self.resize(480, 520)
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "Creates a KMZ file in WGS84 for Google Earth on the web. "
+            "Import it with New → Import file to project. "
+            "The project is stored in Google Drive and opens in the Google Earth app, "
+            "where the phone's GPS position can be compared with these features."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.layers = QListWidget()
+        for choice in choices:
+            label = choice["name"]
+            count = choice.get("feature_count")
+            if isinstance(count, int) and count >= 0:
+                label += f" ({count})"
+            selected = choice.get("selected_count") or 0
+            if selected:
+                label += f", {selected} selected"
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if choice.get("checked") else Qt.Unchecked)
+            item.setData(Qt.UserRole, choice["id"])
+            self.layers.addItem(item)
+        layout.addWidget(self.layers)
+        self.selected_only = QCheckBox("Only features selected on the map")
+        layout.addWidget(self.selected_only)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def choices(self) -> dict:
+        layer_ids = []
+        for index in range(self.layers.count()):
+            item = self.layers.item(index)
+            if item.checkState() == Qt.Checked:
+                layer_ids.append(item.data(Qt.UserRole))
+        return {"layer_ids": layer_ids, "selected_only": self.selected_only.isChecked()}
+
+    def _accept(self) -> None:
+        if not self.choices()["layer_ids"]:
+            QMessageBox.warning(self, "Export for Google Earth", "Select at least one layer.")
+            return
+        self.accept()
+
+
 class PatchPanelDialog(QDialog):
     """Name the panel added on an IDF. Copper and fiber cables are named separately."""
 

@@ -53,6 +53,8 @@ from .bridge import (
     ensure_project,
     ensure_splice_fields,
     existing_keys,
+    collect_earth_layers,
+    earth_layer_choices,
     read_features,
     read_tables,
     scan,
@@ -63,6 +65,7 @@ from .core.cards import write_circuit_cards
 from .core.catalog import feature_id
 from .core.enclosures import enclosure_association, enclosure_edits, enclosure_end_links
 from .core.splice_editor import editor_model, splice_changes
+from .core.earth import empty_export_message, export_note, write_kmz
 from .core.export import export_reports
 from .core.fields import enclosure_id_from_prefix, mapped_values, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix, text_of
 from .core.geometry import distance, split_linestring
@@ -93,6 +96,7 @@ from .dialogs import (
     AssociateDialog,
     BlankAttributeDialog,
     CircuitCardDialog,
+    EarthExportDialog,
     ExportDialog,
     ModifyDialog,
     ChooseAssetDialog,
@@ -244,6 +248,7 @@ class OspConnectivityPlugin:
         self._action("Add device", self.start_device)
         self._action("Add cable", self.start_cable)
         self._action("Set snap tolerance", self.set_tolerance)
+        self._action("Export for Google Earth", self.export_for_earth)
 
         self.report = QPlainTextEdit()
         self.report.setReadOnly(True)
@@ -1255,6 +1260,46 @@ class OspConnectivityPlugin:
         verb = "Updated" if choice['mode'] == 'update' else "Added" if append else "Wrote"
         self.iface.messageBar().pushInfo("OSP Connectivity", f"{verb} {written} row(s) in {path}.")
 
+    def export_for_earth(self):
+        self._run("Export for Google Earth", self._export_earth)
+
+    def _export_earth(self) -> None:
+        project = QgsProject.instance()
+        choices = earth_layer_choices(project)
+        if not choices:
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "Export for Google Earth",
+                "This project has no point, line, or polygon layers to export.",
+            )
+            return
+        dialog = EarthExportDialog(choices, self.iface.mainWindow())
+        if dialog.exec_() != dialog.Accepted:
+            return
+        choice = dialog.choices()
+        path, _filter = QFileDialog.getSaveFileName(
+            self.iface.mainWindow(),
+            "Export for Google Earth",
+            "",
+            "Google Earth (*.kmz)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".kmz"):
+            path += ".kmz"
+        collected = collect_earth_layers(project, choice["layer_ids"], choice["selected_only"])
+        if not collected["layers"]:
+            raise RuntimeError(empty_export_message(collected, choice["selected_only"]))
+        try:
+            summary = write_kmz(path, collected["layers"])
+        except ValueError as exc:
+            raise RuntimeError(f"{exc}\n\n{empty_export_message(collected, choice['selected_only'])}") from exc
+        self._show(f"Saved {path}\n\n{export_note(summary, collected)}")
+        self.iface.messageBar().pushInfo(
+            "OSP Connectivity",
+            f"Wrote {summary['features']} feature(s) for Google Earth.",
+        )
+
     def _circuit_card(self) -> None:
         if not self._reports:
             QMessageBox.information(
@@ -1656,7 +1701,7 @@ class OspConnectivityPlugin:
             "Trace selection": "trace", "Add fiber enclosure": "enclosure", "Add patch panel": "panel",
             "View patch panel": "view-panel", "View switch": "view-switch", "Add switch": "switch",
             "Patching": "patch", "Add device": "device", "Add cable": "cable", "Set snap tolerance": "snap",
-            "Splice Editor": "splice-editor",
+            "Splice Editor": "splice-editor", "Export for Google Earth": "earth",
         }
         path = Path(__file__).parent / "icons" / f"{icons[text]}.svg"
         action = QAction(QIcon(str(path)), text, self.iface.mainWindow())

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sqlite3
 
 from qgis.PyQt.QtCore import QVariant, QDate, QDateTime, Qt
 from qgis.core import (
+    QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsFeature,
     QgsField,
@@ -129,6 +131,206 @@ def read_features(project: QgsProject, layers: dict, infos: list) -> list[dict]:
                 }
             )
     return features
+
+
+def earth_layer_choices(project: QgsProject) -> list[dict]:
+    """Vector layers that have a map location, in layer-tree order.
+
+    OSP layers start checked. Table layers such as splices and circuits are
+    omitted because they have no geometry to survey.
+    """
+    _layers, infos = scan(project)
+    by_id = {info.layer_id: info for info in infos}
+    ordered = []
+    seen = set()
+    root = project.layerTreeRoot()
+    for node in root.findLayers() if root is not None else []:
+        layer = node.layer()
+        if layer is not None and layer.id() not in seen:
+            seen.add(layer.id())
+            ordered.append(layer)
+    for layer in project.mapLayers().values():
+        if layer.id() not in seen:
+            seen.add(layer.id())
+            ordered.append(layer)
+    choices = []
+    for layer in ordered:
+        if not isinstance(layer, QgsVectorLayer) or geometry_kind(layer) == "None":
+            continue
+        info = by_id.get(layer.id())
+        role = info.role if info is not None else None
+        if role in TABLE_ROLES:
+            continue
+        count = layer.featureCount()
+        choices.append({
+            "id": layer.id(),
+            "name": layer.name(),
+            "role": role,
+            "checked": role is not None,
+            "feature_count": count if isinstance(count, int) else -1,
+            "selected_count": layer.selectedFeatureCount(),
+        })
+    return choices
+
+
+def collect_earth_layers(project: QgsProject, layer_ids, selected_only: bool) -> dict:
+    """Read checked layers as longitude, latitude, keeping every part and hole.
+
+    ``_coords`` is not used here. It keeps only the first part of a multipart
+    feature and replaces a polygon with its centroid.
+    """
+    layers, infos = scan(project)
+    by_id = {info.layer_id: info for info in infos}
+    destination = QgsCoordinateReferenceSystem("EPSG:4326")
+    exported = []
+    skipped_crs = []
+    skipped_transform = []
+    partial_failures = []
+    empty_selection = []
+    skipped_geometry = {}
+    seen = set()
+    for layer_id in layer_ids or []:
+        if layer_id in seen:
+            continue
+        seen.add(layer_id)
+        layer = layers.get(layer_id) or project.mapLayer(layer_id)
+        if not isinstance(layer, QgsVectorLayer) or geometry_kind(layer) == "None":
+            continue
+        info = by_id.get(layer_id)
+        if info is not None and info.role in TABLE_ROLES:
+            continue
+        if not layer.crs().isValid():
+            skipped_crs.append(layer.name())
+            continue
+        transform = None
+        if layer.crs().authid() != "EPSG:4326":
+            transform = QgsCoordinateTransform(layer.crs(), destination, project)
+            if not transform.isValid():
+                skipped_crs.append(layer.name())
+                continue
+        if selected_only and layer.selectedFeatureCount() <= 0:
+            empty_selection.append(layer.name())
+            continue
+        source = layer.getSelectedFeatures() if selected_only else layer.getFeatures()
+        features = []
+        failures = 0
+        for qgs_feature in source:
+            geometry = qgs_feature.geometry()
+            if geometry is None or geometry.isEmpty():
+                skipped_geometry[layer.name()] = skipped_geometry.get(layer.name(), 0) + 1
+                continue
+            transformed = _reproject(geometry, transform)
+            if transformed is None:
+                failures += 1
+                continue
+            kind, parts = _earth_parts(transformed)
+            if not parts:
+                skipped_geometry[layer.name()] = skipped_geometry.get(layer.name(), 0) + 1
+                continue
+            attrs = {field.name(): plain(qgs_feature[field.name()]) for field in layer.fields()}
+            identifier = _first_id(info.role, attrs) if info is not None and info.role else None
+            attributes = {}
+            for field in layer.fields():
+                text = text_of(attrs.get(field.name()))
+                if text:
+                    attributes[field.name()] = text
+            features.append({
+                "name": identifier or f"{layer.name()} {qgs_feature.id()}",
+                "attributes": attributes,
+                "kind": kind,
+                "parts": parts,
+            })
+        if features:
+            exported.append({
+                "name": layer.name(),
+                "role": info.role if info is not None else None,
+                "features": features,
+            })
+        elif failures:
+            skipped_transform.append(layer.name())
+        if features and failures:
+            partial_failures.append(f"{layer.name()} ({failures})")
+    return {
+        "layers": exported,
+        "skipped_crs": skipped_crs,
+        "skipped_transform": skipped_transform,
+        "partial_failures": partial_failures,
+        "empty_selection": empty_selection,
+        "skipped_geometry": skipped_geometry,
+    }
+
+
+def _transform_failed(result) -> bool:
+    """True when QgsGeometry.transform reports something other than success.
+
+    Different QGIS versions return None, 0, or an enum whose value is 0.
+    """
+    if result is None or result == 0:
+        return False
+    if getattr(result, "name", None) == "Success":
+        return False
+    if getattr(result, "value", None) == 0:
+        return False
+    return True
+
+
+def _reproject(geometry, transform):
+    geometry = _straight_geometry(QgsGeometry(geometry))
+    if transform is None:
+        return geometry
+    try:
+        result = geometry.transform(transform)
+    except Exception:
+        return None
+    if _transform_failed(result):
+        return None
+    if geometry.isEmpty():
+        return None
+    return geometry
+
+
+def _straight_geometry(geometry: QgsGeometry) -> QgsGeometry:
+    abstract = geometry.constGet()
+    if abstract is None or not QgsWkbTypes.isCurvedType(abstract.wkbType()):
+        return geometry
+    try:
+        straight = abstract.segmentize()
+    except TypeError:
+        straight = abstract.segmentize(math.pi / 180.0)
+    if straight is None:
+        return geometry
+    return QgsGeometry(straight)
+
+
+def _earth_parts(geometry: QgsGeometry):
+    kind = geometry.type()
+    if kind == QgsWkbTypes.PointGeometry:
+        if geometry.isMultipart():
+            points = geometry.asMultiPoint()
+        else:
+            points = [geometry.asPoint()]
+        coords = [(point.x(), point.y()) for point in points]
+        return "point", coords
+    if kind == QgsWkbTypes.LineGeometry:
+        if geometry.isMultipart():
+            lines = geometry.asMultiPolyline()
+        else:
+            lines = [geometry.asPolyline()]
+        parts = [[(point.x(), point.y()) for point in line] for line in lines]
+        return "line", parts
+    if kind == QgsWkbTypes.PolygonGeometry:
+        if geometry.isMultipart():
+            polygons = geometry.asMultiPolygon()
+        else:
+            polygons = [geometry.asPolygon()]
+        parts = []
+        for rings in polygons:
+            parts.append({
+                "outer": [(point.x(), point.y()) for point in rings[0]] if rings else [],
+                "holes": [[(point.x(), point.y()) for point in ring] for ring in rings[1:]],
+            })
+        return "polygon", parts
+    return None, []
 
 
 def read_tables(layers: dict, infos: list) -> dict:

@@ -51,6 +51,7 @@ The **OSP Connectivity** toolbar uses compact square icons. Hover over an icon t
 | Add device | Click the map. Choose the device layer and a unique name. A cable or pole under the click is written onto the device before the attribute dialog, and those fields are left off the form. |
 | Add cable | Draw a line. Snapping and tracing follow the line tool, so the path can follow a duct bank. Ends, panels, ports, and enclosures the line meets are written before the attribute dialog, and those fields are left off the form. |
 | Set snap tolerance | Sets the distance used for duct chaining, enclosure clicks, and panel clicks. |
+| Export for Google Earth | Writes the checked layers to a KMZ file for a Google Earth web project, in WGS84, so the phone GPS can be compared with the plant on site. |
 
 ### Build associations
 
@@ -136,6 +137,20 @@ Use **Update matching links in an existing tracker** to refresh an existing expo
 **Add rows to an existing file** remains available for keeping export history. It appends rows rather than matching links. Create a new `.csv` or `.xlsx` when no tracker exists. New XLSX files include filters, frozen headings/identifying columns, fitted columns, wrapping, alternating rows, and repeated print headings.
 
 CSV files are UTF-8, which lets Excel on Windows keep the ids and strand text intact. Excel workbooks are `.xlsx` and do not need a separate Python package.
+
+### Export for Google Earth
+
+**Export for Google Earth** writes the layers you check to a KMZ file. Each layer becomes a folder of placemarks. Points, lines, and polygons are kept, including polygon holes, and a multipart feature becomes one placemark per part. The asset id is the placemark name. Other filled-in attributes are plain text in the description.
+
+Coordinates are transformed from each layer's CRS to WGS84 (EPSG:4326) with the project's datum transform and written to 8 decimal places. Geometry is not simplified. A layer with no usable CRS is left out and named in the report. **Only features selected on the map** exports the current selection on each checked layer and skips a checked layer that has nothing selected.
+
+Polygon rings are oriented for KML rendering, including boundaries crossing the antimeridian. Characters forbidden by XML are removed from exported text. The report counts rejected geometry parts and names layers with empty or unsupported feature geometry.
+
+Google Earth on the web imports the file. Open [Google Earth](https://earth.google.com/web/), sign in, and choose **New → Import file to project**. An existing project accepts the same file from **File → Import**. The project is stored in Google Drive. Open it in the Google Earth app on a phone to see the device's GPS position against the exported plant.
+
+An import of up to 10,000 features and 250,000 vertices becomes editable project features. A larger file is imported as a read-only data layer, which remains in the project and on the phone. Earth simplifies a single line or polygon that has more than 10,000 vertices. The file itself keeps every vertex, and the report names those features.
+
+The phone's GPS is only as accurate as that phone. The export keeps the source coordinates in WGS84. It does not add survey-grade positioning. Google My Maps can import the same file only when the unzipped KML is under 5 MB and 2,000 features.
 
 ### Print a circuit card
 
