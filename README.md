@@ -78,7 +78,7 @@ Select one fiber enclosure instead, and the same tool opens **Splice Editor**.
 
 ### Splice Editor
 
-Select a fiber enclosure, then click **Splice Editor** (or **Modify associations**). The table loads **all** splice connections in the enclosure, including express fibers and connections between different cable pairs. Contiguous fibers appear as ranges, such as cable A `47-48` → cable C `1-2`.
+Select a fiber enclosure, then click **Splice Editor** (or **Modify associations**). The table loads **all** splice connections in the enclosure, including express fibers and connections between different cable pairs. Connections use `A:47-48 ↔︎ C:1-2`, with type and enclosure shown separately from the cable/strand notation.
 
 - Add a row, change either cable or fiber range, or select rows and delete them. Both fiber ranges must have the same length. A deleted connection leaves its fibers available.
 - Choose **FUSION**, **EXPRESS**, **MECHANICAL**, or **OPEN**. Express fibers retain the same numbers on both cables. OPEN records an explicitly open range; delete that row before assigning those fibers to another connection.
@@ -86,6 +86,7 @@ Select a fiber enclosure, then click **Splice Editor** (or **Modify associations
 - **Express spare fibers** connects matching unused numbers between two chosen cables. Existing connections are preserved.
 - Record a tray, measured loss in dB, status, and notes. Existing native attributes such as splice dates and technician names survive range edits.
 - Filter rows by cable, tray, type, or notes; copy the table; undo and redo edits within the dialog. Filtering only hides rows and does not remove their connections.
+- **Show saved route** highlights the enclosure's associated cables, devices, IDFs, enclosures, and handholes and opens a read-only route summary inside the editor. **Print saved route PDF** exports that stored route. Both actions exclude pending changes in the splice editor; they read the current QGIS project, including existing layer edit buffers.
 - Validation checks fiber counts on both cables, overlapping assignments in either direction, mismatched ranges, ambiguous cable IDs, and invalid measurements. Fix the errors before saving.
 
 **Save** applies the table, adds newly detected enclosure memberships, and labels blank cable endpoints. Only changed splice rows are replaced; other enclosures and unchanged splice records keep their IDs and attributes. **Cancel** leaves the splice table unchanged. Changes stay in the QGIS edit buffers until you save layer edits. Each affected layer has its own undo step.
@@ -96,7 +97,7 @@ Duct segments are ordered by chaining their endpoints. If they do not form one c
 
 ### Trace selection
 
-Select an AP, camera, jack, cable, IDF, or panel, then run **Trace selection**. The report lists the route in plain lines:
+Select an AP, camera, jack, cable, IDF, panel, or splice enclosure, then run **Trace selection**. The report lists the route in plain lines:
 
 - Device
 - Pole, when the device is mounted on one
@@ -108,6 +109,13 @@ Select an AP, camera, jack, cable, IDF, or panel, then run **Trace selection**. 
 - Associated fiber segments, in connection order
 - Splice enclosures on that path
 - Fiber strands, compressed into ranges, including splice hops
+- All recorded splices on associated cables, including open fibers, with each enclosure retained
+
+Fiber connections use `cable:strand ↔︎ cable:strand` or `cable:first-last ↔︎ cable:first-last`, followed by splice type and enclosure. Open fibers use `cable:strand ↔︎ OPEN`. Ranges from separate enclosures or cable layers are never combined. A circuit with no recorded strand assignment is flagged instead of treating every available fiber as that circuit.
+
+Copper links use `IDF101 SWITCH01 Gi1/0/12 -- PP-01:12 -- [CB-01 Cat6] -- DJ-01 -- AP-01`. The data jack is omitted when absent. Missing switch/termination information is identified explicitly in the report. Switch patches are included for both copper and fiber circuits.
+
+New panels and switches are stored with an IDF prefix: entering `PP-01` or `SWITCH01` in IDF101 creates `IDF101-PP-01` or `IDF101-SWITCH01`. Their associations retain those full keys. Toolkit dialogs and documentation display `PP-01` and `SWITCH01` alongside the IDF. The same local name can therefore be used in another IDF. Existing identifiers continue to resolve without a bulk rename.
 
 The map highlight uses orange for cables, blue for devices, green for IDFs, magenta for splice enclosures, and brown for handholes. Duct banks are named in the report and are not highlighted. If the same cable id exists more than once, every copy is highlighted and the report says so.
 
@@ -115,17 +123,23 @@ Trace order is the selected device first, then a selected cable, then a selected
 
 ### Export a spreadsheet
 
-**Export** in the OSP Report dock opens a dialog for the current trace. Check the circuits to include and the columns to write. The columns are always:
+**Export** in the OSP Report dock opens a dialog for the current trace. The XLSX link register has one sheet and one row per complete circuit. Check the circuits and columns to include. Available columns are:
 
-Device, Pole, Cable, Cable type, Length, Ducts, Handholes, IDF, Panel, Port, Strands, Segments, Enclosures, Warnings
+Link ID, Device, Pole, Cable, Cable type, Length, Ducts, Handholes, IDF, Panel, Port, Strands, Horizontal link, Splices, Segments, Enclosures, Warnings, Switch, Switch port, Data jack, Installation status, Test result, Date
 
-Create a new `.csv` or `.xlsx` file, or add the checked rows to a file you already have. Adding rows keeps the columns already in that file, including columns you added by hand, and appends any selected column that is not there yet. Trace another circuit later and add it to the same file. The column names do not change, so the sheet can grow into one table.
+Fiber rows contain the selected circuit's actual strand path, in traversal order, plus its cables, enclosures, handholes, and ducts in wrapped cells. Other cables merely sharing an enclosure are excluded. The PDF's associated-plant inventory remains available separately. Copper rows use the standard horizontal-link chain above. Panel and switch columns display local labels with the IDF in its own column.
+
+Installation status `proposed` is blank in the export. **Test result** is a text field for Pass/Fail, measurements, or a test-report reference. **Date** means installation/completion date and is stored as a real Excel date when recognized. Missing as-built information stays blank. The exporter reads `installation_status`/`install_status` (falling back to `status`), `test_result`/`test_results`, and `completion_date`/`installation_date`/`install_date` from the circuit or cable records. Newly created circuit tables include these tracking fields.
+
+Use **Update matching links in an existing tracker** to refresh an existing export. **Link ID** is a stable key, included but hidden in new XLSX files; keep it even when editing or sorting the sheet. Updates refresh matching link information and add new links. Blank QGIS status, test result, and date values preserve the customer's manually entered tracking values; populated QGIS tracking values replace them. Customer-added columns and untouched cells, formulas, formatting, and other workbook parts are retained. Missing or duplicate link keys stop the update before the original file is changed. File replacement is atomic.
+
+**Add rows to an existing file** remains available for keeping export history. It appends rows rather than matching links. Create a new `.csv` or `.xlsx` when no tracker exists. New XLSX files include filters, frozen headings/identifying columns, fitted columns, wrapping, alternating rows, and repeated print headings.
 
 CSV files are UTF-8, which lets Excel on Windows keep the ids and strand text intact. Excel workbooks are `.xlsx` and do not need a separate Python package.
 
 ### Print a circuit card
 
-**Circuit card** in the OSP Report dock uses the current trace. Check the circuits to include. Each one becomes a page in a PDF: the device, the path from that device through the cable, handholes, and enclosures to the panel and IDF, then the pole, cable, ducts, strands, and any warnings.
+**Circuit card** in the OSP Report dock uses the current trace. Check the circuits to include. Each circuit becomes one or more PDF pages containing devices, associated cables, handholes, enclosures, panel, IDF, pole, ducts, selected strands, and the full saved splice inventory. Associated plant is grouped by asset type; that overview is not a surveyed physical sequence. Every saved splice is retained across continuation pages. The bidirectional fiber arrow is rendered and mapped to Unicode so it also survives text extraction.
 
 The bottom of the first page is a map of the background layers and only the traced cable, device, IDF, enclosures, and handholes. Other plant stays off that map. When the project has no background layer, the map still draws those features.
 
@@ -137,7 +151,7 @@ Choose **Add fiber enclosure**, then click a point on a fiber cable, away from e
 
 - A mid-span click splits that cable into two segments. The original feature keeps its cable id and becomes the piece on the near side. The far piece receives the next id for that layer.
 - Every strand is expressed through on the same strand number unless you say otherwise. Expressed strands are intact glass, not a fusion splice.
-- In the splice dialog, mark strands that stay open and strands that are fusion spliced. A lateral cable whose end lands on the same point can take the fusion. Example: cable A strands 47–48 fused to cable C strands 1–2, with A strands 1–46 and 49–144 expressed to the new segment on the same numbers.
+- In the splice dialog, mark strands that stay open and strands that are fusion spliced. A lateral cable whose end lands on the same point can take the fusion. Example: `A:47-48 ↔︎ C:1-2` (fusion), with `A:1-46 ↔︎ B:1-46` and `A:49-144 ↔︎ B:49-144` expressed on the same numbers.
 - Clicking where two through cables cross splits both and tells you the enclosure has four cable ends.
 - A click on an endpoint does not split that cable. It is treated as a lateral that ends at the enclosure.
 - Canceling the splice dialog rolls the split back.

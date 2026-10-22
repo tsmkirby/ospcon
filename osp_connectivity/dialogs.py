@@ -34,6 +34,7 @@ from .core.handholes import handhole_label
 from .core.export import COLUMNS, item_label
 from .core.fields import parse_count, parse_range
 from .core.place import name_taken
+from .core.naming import local_asset_id, scoped_asset_id
 from .core.strands import build_splice_rows, compress_splices, validate_edits
 from .core.splice_editor import group_rows, strict_range, validate_groups
 from .core.switches import (
@@ -44,6 +45,13 @@ from .core.switches import (
     patch_line,
     switches_for_idf,
 )
+
+
+def _panel_key(combo, idf):
+    text = combo.currentText().strip()
+    if combo.currentIndex() >= 0 and text == combo.itemText(combo.currentIndex()) and combo.currentData():
+        return combo.currentData()
+    return scoped_asset_id(text, idf.currentData() or idf.currentText())
 
 
 class AssociateDialog(QDialog):
@@ -150,13 +158,13 @@ class AssociateDialog(QDialog):
         self.ducts.setCurrentRow(target)
 
     def _accept(self) -> None:
-        panel = self.panel.currentText().strip()
+        panel = _panel_key(self.panel, self.idf)
         port = self.port.text().strip()
         if self.proposal.idfs and (not panel or not port):
             QMessageBox.warning(self, "Associate selection", "Enter the panel and the port.")
             return
         if panel and port and port_in_use(self.occupied, panel, port):
-            QMessageBox.warning(self, "Associate selection", f"{panel} port {port} is already used.")
+            QMessageBox.warning(self, "Associate selection", f"{self.idf.currentText()} {local_asset_id(panel, self.idf.currentData())}:{port} is already used.")
             return
         if self.proposal.media == "fiber" and not parse_range(self.strands.text()):
             QMessageBox.warning(self, "Associate selection", "Enter the fiber strand numbers, such as 1-2.")
@@ -177,7 +185,7 @@ class AssociateDialog(QDialog):
             "a_role": self.a_end.currentText(),
             "z_role": self.z_end.currentText(),
             "idf_id": self.idf.currentData() or self.idf.currentText(),
-            "panel_id": self.panel.currentText().strip(),
+            "panel_id": _panel_key(self.panel, self.idf),
             "port": self.port.text().strip(),
             "strands": self.strands.text().strip(),
             "handholes": handholes,
@@ -190,7 +198,7 @@ class AssociateDialog(QDialog):
         self.panel.blockSignals(True)
         self.panel.clear()
         for name in names:
-            self.panel.addItem(name)
+            self.panel.addItem(local_asset_id(name, idf_id), name)
         if current:
             self.panel.setCurrentText(current)
         self.panel.blockSignals(False)
@@ -418,7 +426,7 @@ class ModifyDialog(QDialog):
         self._refill_panels()
         self.idf.currentIndexChanged.connect(self._refill_panels)
         if association.get("panel"):
-            self.panel.setCurrentText(association["panel"])
+            self.panel.setCurrentText(local_asset_id(association["panel"], self.idf.currentData()))
         layout.addWidget(QLabel("Handholes"))
         self.handholes = QListWidget()
         checked = {
@@ -449,21 +457,21 @@ class ModifyDialog(QDialog):
         self.panel.blockSignals(True)
         self.panel.clear()
         for name in names:
-            self.panel.addItem(name)
+            self.panel.addItem(local_asset_id(name, idf_id), name)
         if current:
             self.panel.setCurrentText(current)
         elif self.association.get("panel"):
-            self.panel.setCurrentText(self.association["panel"])
+            self.panel.setCurrentText(local_asset_id(self.association["panel"], idf_id))
         self.panel.blockSignals(False)
 
     def _accept(self) -> None:
-        panel = self.panel.currentText().strip()
+        panel = _panel_key(self.panel, self.idf)
         port = self.port.text().strip()
         if self.association.get("idfs") and (not panel or not port):
             QMessageBox.warning(self, "Modify associations", "Enter the panel and the port.")
             return
         if panel and port and port_in_use(self.occupied, panel, port):
-            QMessageBox.warning(self, "Modify associations", f"{panel} port {port} is already used.")
+            QMessageBox.warning(self, "Modify associations", f"{self.idf.currentText()} {local_asset_id(panel, self.idf.currentData())}:{port} is already used.")
             return
         if self.association.get("media") == "fiber" and self.strands.text().strip() and not parse_range(self.strands.text()):
             QMessageBox.warning(self, "Modify associations", "Enter the fiber strand numbers, such as 1-2.")
@@ -478,7 +486,7 @@ class ModifyDialog(QDialog):
                 handholes.append(item.data(Qt.UserRole))
         return {
             "idf_id": self.idf.currentData() or self.idf.currentText(),
-            "panel_id": self.panel.currentText().strip(),
+            "panel_id": _panel_key(self.panel, self.idf),
             "port": self.port.text().strip(),
             "strands": self.strands.text().strip(),
             "handholes": handholes,
@@ -532,7 +540,9 @@ class ExportDialog(QDialog):
         self.setWindowTitle("Export report")
         self.resize(520, 560)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Check the circuits and columns to write. Column names stay the same every time, so later exports can be added to this file."))
+        description = QLabel("One row per circuit, with only its strand path and route assets. Include Link ID to update matching links later. Blank QGIS tracking values preserve entries in an existing tracker.")
+        description.setWordWrap(True)
+        layout.addWidget(description)
 
         lists = QHBoxLayout()
         self.items = QListWidget()
@@ -546,7 +556,7 @@ class ExportDialog(QDialog):
         for name in COLUMNS:
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked)
+            item.setCheckState(Qt.Unchecked if name == 'Splices' else Qt.Checked)
             item.setData(Qt.UserRole, name)
             self.fields.addItem(item)
         lists.addWidget(self._boxed("Items", self.items))
@@ -556,6 +566,7 @@ class ExportDialog(QDialog):
         form = QFormLayout()
         self.mode = QComboBox()
         self.mode.addItem("Create a new file", "new")
+        self.mode.addItem("Update matching links in an existing tracker", "update")
         self.mode.addItem("Add rows to an existing file", "append")
         self.format = QComboBox()
         self.format.addItem("Excel (.xlsx)", "xlsx")
@@ -605,6 +616,9 @@ class ExportDialog(QDialog):
         if not choice["fields"]:
             QMessageBox.warning(self, "Export report", "Select at least one field.")
             return
+        if choice['mode'] == 'update' and 'Link ID' not in choice['fields']:
+            QMessageBox.warning(self, 'Export report', 'Include Link ID to update matching links.')
+            return
         self.accept()
 
 
@@ -613,6 +627,7 @@ class PatchPanelDialog(QDialog):
 
     def __init__(self, idf_id: str, groups: list[dict], suggestions: dict, taken, occupied, parent=None):
         super().__init__(parent)
+        self.idf_id = idf_id
         self.groups = groups or []
         self.suggestions = suggestions or {}
         self.taken = list(taken or [])
@@ -681,30 +696,30 @@ class PatchPanelDialog(QDialog):
     def _accept(self) -> None:
         names = []
         if not self.groups:
-            panel = self.panel.text().strip()
+            panel = scoped_asset_id(self.panel.text().strip(), self.idf_id)
             if not panel:
                 QMessageBox.warning(self, "Add patch panel", "Enter a panel id.")
                 return
             if name_taken(panel, self.taken):
-                QMessageBox.warning(self, "Add patch panel", f"{panel} is already used. Choose a different name.")
+                QMessageBox.warning(self, "Add patch panel", f"{local_asset_id(panel, self.idf_id)} is already used on {self.idf_id}. Choose a different name.")
                 return
             self.accept()
             return
         for row, group in zip(self.rows, self.groups):
-            panel = row["panel"].text().strip()
+            panel = scoped_asset_id(row["panel"].text().strip(), self.idf_id)
             port = row["port"].text().strip()
             label = "Fiber" if group.get("media") == "fiber" else "Copper"
             if not panel:
                 QMessageBox.warning(self, "Add patch panel", f"Enter the {label.lower()} panel id.")
                 return
             if name_taken(panel, self.taken) or name_taken(panel, names):
-                QMessageBox.warning(self, "Add patch panel", f"{panel} is already used. Choose a different name.")
+                QMessageBox.warning(self, "Add patch panel", f"{local_asset_id(panel, self.idf_id)} is already used on {self.idf_id}. Choose a different name.")
                 return
             if not port:
-                QMessageBox.warning(self, "Add patch panel", f"Enter the port for {panel}.")
+                QMessageBox.warning(self, "Add patch panel", f"Enter the port for {self.idf_id} {local_asset_id(panel, self.idf_id)}.")
                 return
             if port_in_use(self.occupied, panel, port):
-                QMessageBox.warning(self, "Add patch panel", f"{panel} port {port} is already used.")
+                QMessageBox.warning(self, "Add patch panel", f"{self.idf_id} {local_asset_id(panel, self.idf_id)}:{port} is already used.")
                 return
             if group.get("media") == "fiber" and not parse_range(row["strands"].text()):
                 QMessageBox.warning(self, "Add patch panel", "Enter the fiber strand numbers, such as 1-2.")
@@ -714,12 +729,12 @@ class PatchPanelDialog(QDialog):
 
     def choices(self) -> list[dict]:
         if not self.groups:
-            return [{"panel_id": self.panel.text().strip(), "media": self.media.currentData(), "associate": False}]
+            return [{"panel_id": scoped_asset_id(self.panel.text().strip(), self.idf_id), "media": self.media.currentData(), "associate": False}]
         chosen = []
         for row, group in zip(self.rows, self.groups):
             chosen.append(
                 {
-                    "panel_id": row["panel"].text().strip(),
+                    "panel_id": scoped_asset_id(row["panel"].text().strip(), self.idf_id),
                     "media": group.get("media"),
                     "associate": True,
                     "a_role": row["a_end"].currentText(),
@@ -814,7 +829,7 @@ class PlacementDialog(QDialog):
             "a_role": self.a_end.currentText(),
             "z_role": self.z_end.currentText(),
             "idf_id": self.idf.currentData() or self.idf.currentText(),
-            "panel_id": self.panel.currentText().strip(),
+            "panel_id": _panel_key(self.panel, self.idf),
             "port": self.port.text().strip(),
             "strands": self.strands.text().strip(),
         }
@@ -827,11 +842,11 @@ class PlacementDialog(QDialog):
         self.panel.blockSignals(True)
         self.panel.clear()
         for name in names:
-            self.panel.addItem(name)
+            self.panel.addItem(local_asset_id(name, idf_id), name)
         if current:
             self.panel.setCurrentText(current)
         elif preferred:
-            self.panel.setCurrentText(preferred)
+            self.panel.setCurrentText(local_asset_id(preferred, idf_id))
         self.panel.blockSignals(False)
 
     def _media_changed(self) -> None:
@@ -847,13 +862,13 @@ class PlacementDialog(QDialog):
             QMessageBox.warning(self, self.windowTitle(), f"{name} is already used. Choose a different name.")
             return
         if self.context.get("associate") and (self.context.get("idfs") or self.context.get("panel_id")):
-            panel = self.panel.currentText().strip()
+            panel = _panel_key(self.panel, self.idf)
             port = self.port.text().strip()
             if not panel or not port:
                 QMessageBox.warning(self, self.windowTitle(), "Enter the panel and the port.")
                 return
             if port_in_use(self.occupied, panel, port):
-                QMessageBox.warning(self, self.windowTitle(), f"{panel} port {port} is already used.")
+                QMessageBox.warning(self, self.windowTitle(), f"{self.idf.currentText()} {local_asset_id(panel, self.idf.currentData())}:{port} is already used.")
                 return
             if self.media.currentData() == "fiber" and not parse_range(self.strands.text()):
                 QMessageBox.warning(self, self.windowTitle(), "Enter the fiber strand numbers, such as 1-2.")
@@ -1070,16 +1085,20 @@ class PanelViewDialog(QDialog):
 class SwitchDialog(QDialog):
     """Attributes for a switch placed on an IDF."""
 
-    def __init__(self, suggested_id: str, taken: list, parent=None):
+    def __init__(self, suggested_id: str, taken: list, parent=None, idf_id=''):
         super().__init__(parent)
         self.taken = taken
+        self.idf_id = idf_id
         self.setWindowTitle("Add switch")
         self.resize(420, 420)
         layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f'IDF: {idf_id}'))
         form = QFormLayout()
         self.identifier = QLineEdit(suggested_id)
         form.addRow("Switch id", self.identifier)
         self.name = QLineEdit(suggested_id)
+        self._previous_identifier = suggested_id
+        self.identifier.textChanged.connect(self._follow_identifier)
         form.addRow("Name", self.name)
         self.count = QSpinBox()
         self.count.setRange(1, 512)
@@ -1104,13 +1123,18 @@ class SwitchDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _follow_identifier(self, text):
+        if self.name.text() == self._previous_identifier:
+            self.name.setText(local_asset_id(text, self.idf_id))
+        self._previous_identifier = text
+
     def _accept(self) -> None:
-        identifier = self.identifier.text().strip()
+        identifier = scoped_asset_id(self.identifier.text().strip(), self.idf_id)
         if not identifier:
             QMessageBox.warning(self, "Add switch", "Enter a switch id, such as VIB-SW-0001.")
             return
         if identifier.casefold() in {item.casefold() for item in self.taken}:
-            QMessageBox.warning(self, "Add switch", f"{identifier} already exists.")
+            QMessageBox.warning(self, "Add switch", f"{local_asset_id(identifier, self.idf_id)} already exists on {self.idf_id}.")
             return
         if not self.name.text().strip():
             QMessageBox.warning(self, "Add switch", "Enter a switch name.")
@@ -1119,7 +1143,7 @@ class SwitchDialog(QDialog):
 
     def choices(self) -> dict:
         return {
-            "sw_id": self.identifier.text().strip(),
+            "sw_id": scoped_asset_id(self.identifier.text().strip(), self.idf_id),
             "sw_name": self.name.text().strip(),
             "sw_port_count": int(self.count.value()),
             "make": self.make.text().strip(),
@@ -1203,7 +1227,7 @@ class PatchDialog(QDialog):
         self.panel.blockSignals(True)
         self.panel.clear()
         for feature in panels_for_idf(idf_id, self.features, "fiber" if fiber else "copper"):
-            self.panel.addItem(feature_id(feature) or "", feature)
+            self.panel.addItem(local_asset_id(feature_id(feature), idf_id), feature)
         if current_panel is not None:
             for index in range(self.panel.count()):
                 if feature_id(self.panel.itemData(index) or {}) == feature_id(current_panel):
@@ -1214,7 +1238,7 @@ class PatchDialog(QDialog):
         self.switch.blockSignals(True)
         self.switch.clear()
         for row in switches_for_idf(idf_id, self.tables.get("switches") or []):
-            label = row.get("sw_name") or row.get("sw_id")
+            label = local_asset_id(row.get("sw_name") or row.get("sw_id"), idf_id)
             self.switch.addItem(str(label), row)
         if current_switch:
             wanted = (current_switch.get("sw_id") or "").casefold()

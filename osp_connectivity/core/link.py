@@ -13,6 +13,8 @@ from .catalog import (
 )
 from .fields import is_blank, parse_count, text_of
 from .geometry import ducts_along_cable
+from .naming import local_asset_id
+from .notation import panel_end
 from .strands import strand_numbers_for
 from .fields import media_of
 
@@ -122,6 +124,8 @@ def plan_links(
 def _link_ends(plan: LinkPlan, cable: dict, index: dict, claimed: set[tuple]) -> None:
     values = cable.get("values") or {}
     cable_identifier = feature_id(cable)
+    idf_id = next((feature_id(hit) for end in ('a_end', 'z_end')
+                   for hit in resolve_end(index, values.get(end), cable) if hit.get('role') == 'idf'), '')
     for end_name in ("a_end", "z_end"):
         panel_key = "a_panel" if end_name == "a_end" else "z_panel"
         port_key = "a_port" if end_name == "a_end" else "z_port"
@@ -145,7 +149,7 @@ def _link_ends(plan: LinkPlan, cable: dict, index: dict, claimed: set[tuple]) ->
                 "panel",
                 values.get(panel_key),
                 bool(text_of(values.get(panel_key))) and is_blank(hit_values.get("panel")),
-                f"Copied panel {values.get(panel_key)} onto {feature_id(hit)}.",
+                f"Copied panel {idf_id} {panel_end(local_asset_id(values.get(panel_key), idf_id), values.get(port_key))} onto {feature_id(hit)}.",
             )
             _queue_edit(
                 plan,

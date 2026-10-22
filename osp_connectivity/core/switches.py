@@ -7,6 +7,8 @@ import re
 from .catalog import feature_id
 from .fields import next_id, parse_count, text_of
 from .panels import panel_is_simplex, panel_ports
+from .notation import panel_end
+from .naming import local_asset_id
 
 
 def suggest_switch_id(existing, idf_id: str) -> str:
@@ -38,10 +40,10 @@ def switches_for_idf(idf_id: str, switches: list[dict]) -> list[dict]:
     return [row for row in switches if _same(row.get("mdf_idf_id"), idf_id) and text_of(row.get("sw_id"))]
 
 
-def choice_label(identifier, name) -> str:
+def choice_label(identifier, name, idf_id='') -> str:
     """'PP-1  Lobby' when a name is present, otherwise just the id."""
-    text = text_of(identifier) or ""
-    label = text_of(name) or ""
+    text = local_asset_id(identifier, idf_id)
+    label = local_asset_id(name, idf_id)
     if label and label.casefold() != text.casefold():
         return f"{text} {label}"
     return text
@@ -79,7 +81,7 @@ def switch_inventory(switch: dict, ports: list[dict], patches: list[dict]) -> di
         )
     count = parse_count(switch.get("sw_port_count")) or len(items)
     return {
-        "title": choice_label(sw_id, switch.get("sw_name")),
+        "title": choice_label(sw_id, switch.get("sw_name"), switch.get('mdf_idf_id')),
         "sw_id": sw_id,
         "sw_name": text_of(switch.get("sw_name")) or "",
         "idf_id": text_of(switch.get("mdf_idf_id")) or "",
@@ -144,8 +146,8 @@ def patches_for_idf(idf_id: str, patches: list[dict]) -> list[dict]:
 def patch_line(row: dict) -> str:
     kind = "fiber" if (text_of(row.get("media_type")) or "").casefold() == "fiber" else "copper"
     return (
-        f"{kind}: {text_of(row.get('panel_id')) or '?'} port {text_of(row.get('panel_port')) or '?'} "
-        f"to {text_of(row.get('sw_id')) or '?'} {text_of(row.get('switch_port_id')) or '?'}"
+        f"{row.get('mdf_idf_id') or '?'} {kind}: {panel_end(local_asset_id(row.get('panel_id'), row.get('mdf_idf_id')) or '?', text_of(row.get('panel_port')) or '?')} "
+        f"-- {local_asset_id(row.get('sw_id'), row.get('mdf_idf_id')) or '?'} {text_of(row.get('switch_port_id')) or '?'}"
     )
 
 

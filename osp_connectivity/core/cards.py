@@ -1,6 +1,7 @@
 """One printable page per traced circuit. The PDF uses only the standard fonts."""
 
 from __future__ import annotations
+from .notation import panel_end
 
 
 PAGE_WIDTH = 612
@@ -114,12 +115,13 @@ def _blocks(report: dict) -> list[dict]:
     ]
     path = _path(report)
     if path:
-        blocks.append(_block("PATH", 9, True, 14))
+        blocks.append(_block("ASSOCIATED PLANT (grouped by asset type)", 9, True, 14))
         for line in _wrap(path, 70):
             blocks.append(_block(line, 11, False, 16))
         blocks.append(_block("", 4, False, 10, rule=True))
     rows = [
         ("Device", device),
+        ("Associated devices", ', '.join(report.get('associated_devices') or [])),
         ("Pole", report.get("pole_id") or ""),
         ("Cable", _cable_line(report)),
         ("Segments", " > ".join(report.get("segments") or [])),
@@ -128,6 +130,9 @@ def _blocks(report: dict) -> list[dict]:
         ("Enclosures", ", ".join(report.get("enclosures") or [])),
         ("IDF", report.get("idf_id") or ""),
         ("Panel", _panel_line(report)),
+        ("Horizontal link", report.get("horizontal_link") or ""),
+        ("Switch", '' if report.get('horizontal_link') else
+         ' '.join(value for value in (report.get('switch_id'), report.get('switch_port')) if value)),
         ("Strands", ""),
     ]
     for label, value in rows:
@@ -143,6 +148,11 @@ def _blocks(report: dict) -> list[dict]:
         blocks.append(_block("Strands:", 11, True, 16))
         for strand in strands:
             for line in _wrap(strand, 78):
+                blocks.append(_block(f"    {line}", 10, False, 14))
+    if report.get('splice_lines'):
+        blocks.append(_block("Saved route splices (all associated fibers):", 11, True, 16))
+        for splice in report['splice_lines']:
+            for line in _wrap(splice, 78):
                 blocks.append(_block(f"    {line}", 10, False, 14))
     for warning in report.get("warnings") or []:
         for line in _wrap(f"Warning:  {warning}", 78):
@@ -187,9 +197,7 @@ def _cable_line(report: dict) -> str:
 def _panel_line(report: dict) -> str:
     panel = report.get("panel_id") or ""
     port = report.get("panel_port") or ""
-    if panel and port:
-        return f"{panel} port {port}"
-    return panel or (f"port {port}" if port else "")
+    return panel_end(panel, port)
 
 
 def _block(text: str, size: int, bold: bool, gap: int, rule: bool = False) -> dict:
@@ -226,7 +234,9 @@ def _pack(blocks: list[dict], map_reserved: bool = False) -> list[list[dict]]:
 
 
 def _wrap(text: str, width: int) -> list[str]:
-    words = str(text).split()
+    # A site ID can be longer than an entire line; split it instead of clipping.
+    words = [chunk for word in str(text).split()
+             for chunk in (word[index:index + width] for index in range(0, len(word), width))]
     if not words:
         return []
     lines = []
@@ -242,10 +252,10 @@ def _wrap(text: str, width: int) -> list[str]:
 
 
 def _pdf(pages: list[dict]) -> bytes:
-    # Objects: 1 catalog, 2 pages, then each page and its content, then two fonts, then map images.
+    # Standard text fonts plus Symbol for the bidirectional link arrow.
     fonts_index = 3 + len(pages) * 2
     image_numbers = {}
-    next_image = fonts_index + 2
+    next_image = fonts_index + 4
     for page in pages:
         image = page.get("image")
         if image and id(image) not in image_numbers:
@@ -266,7 +276,7 @@ def _pdf(pages: list[dict]) -> bytes:
             f"{page_number} 0 obj << /Type /Page /Parent 2 0 R "
             f"/MediaBox [0 0 {PAGE_WIDTH} {PAGE_HEIGHT}] "
             f"/Contents {contents_number} 0 R "
-            f"/Resources << /Font << /F1 {fonts_index} 0 R /F2 {fonts_index + 1} 0 R >>{xobject} >> >> endobj\n"
+            f"/Resources << /Font << /F1 {fonts_index} 0 R /F2 {fonts_index + 1} 0 R /F3 {fonts_index + 2} 0 R >>{xobject} >> >> endobj\n"
         )
         stream = _content(page["blocks"], index + 1, len(pages), bool(image))
         body.append(
@@ -282,6 +292,15 @@ def _pdf(pages: list[dict]) -> bytes:
     body.append(
         f"{fonts_index + 1} 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >> endobj\n".encode("ascii")
     )
+    body.append(f"{fonts_index + 2} 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Symbol /ToUnicode {fonts_index + 3} 0 R >> endobj\n")
+    cmap = ("/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+            "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+            "/CMapName /LinkArrow def /CMapType 2 def\n"
+            "1 begincodespacerange <00> <FF> endcodespacerange\n"
+            "1 beginbfchar <AB> <2194FE0E> endbfchar\n"
+            "endcmap CMapName currentdict /CMap defineresource pop end end\n").encode('ascii')
+    body.append(f"{fonts_index + 3} 0 obj << /Length {len(cmap)} >> stream\n".encode('ascii')
+                + cmap + b"endstream\nendobj\n")
     written = set()
     for page in pages:
         image = page.get("image")
@@ -321,8 +340,13 @@ def _content(blocks: list[dict], page_number: int, page_count: int, draw_map: bo
         y -= block["gap"]
         if block["text"]:
             font = "F2" if block["bold"] else "F1"
+            # Symbol's 0xAB is the actual left-right arrow, not a Latin-1 substitute.
+            parts = str(block['text']).replace('\u2194\ufe0e', '\u2194').split('\u2194')
+            runs = f" /{font} {block['size']} Tf (" + _pdf_text(parts[0]) + ") Tj"
+            for part in parts[1:]:
+                runs += f" /F3 {block['size']} Tf <AB> Tj /{font} {block['size']} Tf ({_pdf_text(part)}) Tj"
             lines.append(
-                f"BT /{font} {block['size']} Tf 1 0 0 1 {LEFT} {y} Tm ({_pdf_text(block['text'])}) Tj ET"
+                f"BT 1 0 0 1 {LEFT} {y} Tm{runs} ET"
             )
         if block.get("rule"):
             rule_y = y - 6

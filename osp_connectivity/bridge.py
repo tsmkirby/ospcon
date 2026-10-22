@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 
-from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtCore import QVariant, QDate, QDateTime, Qt
 from qgis.core import (
     QgsCoordinateTransform,
     QgsFeature,
@@ -52,6 +52,8 @@ GRAPH_ROLES = (
 def plain(value):
     if value is None:
         return None
+    if isinstance(value, (QDate, QDateTime)):
+        return value.toString(Qt.ISODate) if value.isValid() else None
     if type(value).__name__ in ("QPyNullVariant", "NULL"):
         return None
     if not isinstance(value, (str, int, float, bool)) and hasattr(value, "isNull"):
@@ -718,6 +720,9 @@ def _layer_specs(project: QgsProject):
         integer("strand_from"),
         integer("strand_to"),
         text("status"),
+        text("installation_status"),
+        text("test_result"),
+        text("completion_date"),
     ]
     enclosure_fields = [
         text("splice_enc_id"),

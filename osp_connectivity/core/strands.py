@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .fields import parse_count, parse_range
+from .notation import fiber_link
 
 
 def build_splice_rows(
@@ -122,23 +123,24 @@ def compress_splices(rows: list[dict]) -> list[str]:
             "b_from": int(row["b_strand_no"]) if row.get("b_strand_no") else None,
             "b_to": int(row["b_strand_no"]) if row.get("b_strand_no") else None,
             "splice_type": row.get("splice_type") or "",
+            "splice_enc_id": row.get("splice_enc_id") or "",
+            "a_layer_id": row.get("a_layer_id") or "",
+            "b_layer_id": row.get("b_layer_id") or "",
         }
         groups.append(current)
     lines = []
     for group in groups:
-        a_range = _fmt(group["a_from"], group["a_to"])
         kind = (group["splice_type"] or "splice").lower()
-        if group["b_cable_id"] and group["b_from"]:
-            b_range = _fmt(group["b_from"], group["b_to"])
-            lines.append(
-                f"{group['a_cable_id']} strands {a_range} {kind} to {group['b_cable_id']} strands {b_range}"
-            )
-        else:
-            lines.append(f"{group['a_cable_id']} strands {a_range} {kind}")
+        connection = fiber_link(group['a_cable_id'], group['a_from'], group['a_to'],
+                                None if kind == 'open' else group['b_cable_id'], group['b_from'], group['b_to'])
+        location = f" @ {group['splice_enc_id']}" if group['splice_enc_id'] else ""
+        lines.append(f"{connection} ({kind}{location})")
     return lines
 
 
 def _continues(group: dict, row: dict) -> bool:
+    if any((row.get(key) or "") != group[key] for key in ("splice_enc_id", "a_layer_id", "b_layer_id")):
+        return False
     if row.get("a_cable_id") != group["a_cable_id"]:
         return False
     if (row.get("splice_type") or "") != group["splice_type"]:

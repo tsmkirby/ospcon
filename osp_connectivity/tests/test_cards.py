@@ -51,7 +51,7 @@ class CircuitCardTests(unittest.TestCase):
         self.assertIn("CAT6 flooded", text)
         self.assertIn("120 ft", text)
         self.assertIn("0001 > 0002", text)
-        self.assertIn("RR02.PP01 port 14 @ VIB-IDF-0002", text)
+        self.assertIn("RR02.PP01:14 @ VIB-IDF-0002", text)
         self.assertEqual(len(pages), 1)
 
         handle, path = tempfile.mkstemp(suffix=".pdf")
@@ -74,13 +74,13 @@ class CircuitCardTests(unittest.TestCase):
             "idf_id": "IDF-1",
             "panel_id": "FD-1",
             "panel_port": "1",
-            "strand_lines": [f"FB-1 strand {number} expressed to FB-2 strand {number}" for number in range(1, 80)],
+            "strand_lines": [f"FB-1:{number} ↔︎ FB-2:{number} (express @ EN-1)" for number in range(1, 80)],
         }
         pages = circuit_card_pages([report])
         self.assertGreater(len(pages), 1)
         continued = "\n".join(block["text"] for block in pages[1]["blocks"])
         self.assertIn("AP-1 (continued)", continued)
-        self.assertIn("strand 79", "\n".join(block["text"] for page in pages for block in page["blocks"]))
+        self.assertIn("FB-1:79 ↔︎ FB-2:79", "\n".join(block["text"] for page in pages for block in page["blocks"]))
 
     def test_empty_selection_is_rejected(self):
         with self.assertRaises(ValueError):

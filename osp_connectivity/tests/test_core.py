@@ -153,9 +153,9 @@ class StrandTests(unittest.TestCase):
             fusions=[{"a_from": 47, "a_to": 48, "b_cable_id": "C", "b_start": 1}],
         )
         text = " ".join(compress_splices(rows))
-        self.assertIn("A strands 1-46 express to B strands 1-46", text)
-        self.assertIn("A strands 47-48 fusion to C strands 1-2", text)
-        self.assertIn("A strands 49-144 express to B strands 49-144", text)
+        self.assertIn("A:1-46 ↔︎ B:1-46 (express @ ENC)", text)
+        self.assertIn("A:47-48 ↔︎ C:1-2 (fusion @ ENC)", text)
+        self.assertIn("A:49-144 ↔︎ B:49-144 (express @ ENC)", text)
         self.assertEqual(len(rows), 144)
         problems = validate_edits(
             144,
@@ -318,7 +318,7 @@ class AssociateAndTraceTests(unittest.TestCase):
         self.assertIn("Cable: vib.cpr.0008", text)
         self.assertIn("Ducts: 0001 > 0002", text)
         self.assertIn("IDF: VIB-IDF-0002", text)
-        self.assertIn("port 14", text)
+        self.assertIn("RR02.PP01:14", text)
         self.assertEqual(result["highlights"]["cables"], [("cables", 1)])
         self.assertEqual(result["highlights"]["idfs"], [("idfs", 2)])
         self.assertFalse(any(item[0] == "db" for item in result["highlights"]["cables"]))

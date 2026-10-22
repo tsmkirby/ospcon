@@ -67,7 +67,7 @@ from .core.export import export_reports
 from .core.fields import enclosure_id_from_prefix, mapped_values, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix, text_of
 from .core.geometry import distance, split_linestring
 from .core.link import RowInsert, plan_links
-from .core.panels import panel_feature_ids, panel_ports, suggest_panel_id
+from .core.panels import panel_feature_ids, panel_ports
 from .core.place import (
     cable_layer_choices,
     device_layer_choices,
@@ -86,8 +86,9 @@ from .core.place import (
     taken_device_names,
 )
 from .core.strands import build_splice_rows
-from .core.switches import choice_label, expand_switch_ports, panels_on_idf, suggest_switch_id, switch_inventory, switches_for_idf
+from .core.switches import choice_label, expand_switch_ports, panels_on_idf, switch_inventory, switches_for_idf
 from .core.trace import format_report, trace_selection
+from .core.naming import local_asset_id, scoped_asset_id
 from .dialogs import (
     AssociateDialog,
     BlankAttributeDialog,
@@ -467,11 +468,13 @@ class OspConnectivityPlugin:
     def _create_panel(self, session, project, layers, infos, spec) -> str:
         if not spec:
             return ""
+        spec['panel_id'] = scoped_asset_id(spec['panel_id'], spec['idf_id'])
+        label = local_asset_id(spec['panel_id'], spec['idf_id'])
         if spec.get("x") is None or spec.get("y") is None:
-            return f"{spec['panel_id']} was not created because {spec['idf_id']} has no location."
+            return f"{label} was not created because {spec['idf_id']} has no location."
         count = spec.get("port_count")
         if not count:
-            dialog = PortCountDialog(spec["panel_id"], self.iface.mainWindow())
+            dialog = PortCountDialog(f"{spec['idf_id']} {label}", self.iface.mainWindow())
             if dialog.exec_() != dialog.Accepted:
                 raise Cancelled()
             count = dialog.port_count()
@@ -489,7 +492,7 @@ class OspConnectivityPlugin:
             spec.get("media") or "copper",
             int(count),
         )
-        return f"Patch panel {spec['panel_id']} was added for {spec['idf_id']} with {int(count)} ports."
+        return f"Patch panel {label} was added for {spec['idf_id']} with {int(count)} ports."
 
     def _add_panel(self, canvas_point):
         project, point_xy, layers, infos, features = self._click_context(canvas_point)
@@ -505,16 +508,12 @@ class OspConnectivityPlugin:
                     f"More than one device is on the {kind} cables at this point. Use Associate selection."
                 )
         existing = panel_feature_ids(features)
-        template_style = not any(
-            "osp_links.gpkg" in (info.source or "")
-            for info in infos
-            if info.role in ("patch_panel", "fdp", "splice_enc")
-        )
         idf_id = feature_id(idf) or ""
-        suggestions = {
-            "copper": suggest_panel_id(existing, idf_id, False, template_style),
-            "fiber": suggest_panel_id(existing, idf_id, True, template_style),
-        }
+        local_panels = [local_asset_id(feature_id(item), idf_id) for item in features
+                        if item.get('role') in ('patch_panel', 'fdp')
+                        and text_of((item.get('values') or {}).get('idf_ref')) == idf_id]
+        existing.extend(scoped_asset_id(name, idf_id) for name in local_panels)
+        suggestions = {'copper': next_id(local_panels, 'PP-00'), 'fiber': next_id(local_panels, 'FD-00')}
         dialog_groups = []
         for group in groups:
             dialog_groups.append(
@@ -538,7 +537,7 @@ class OspConnectivityPlugin:
         choices = dialog.choices()
         for choice in choices:
             if name_taken(choice["panel_id"], existing):
-                raise RuntimeError(f"{choice['panel_id']} already exists.")
+                raise RuntimeError(f"{local_asset_id(choice['panel_id'], idf_id)} already exists on {idf_id}.")
         layers, infos, store = ensure_project(project, layers, infos)
         for choice in choices:
             layers, infos, _panel_layer = ensure_panel_layer(
@@ -1230,14 +1229,14 @@ class OspConnectivityPlugin:
         if dialog.exec_() != dialog.Accepted:
             return
         choice = dialog.choices()
-        if choice["mode"] == "append":
+        if choice["mode"] in ("append", "update"):
             path, _filter = QFileDialog.getOpenFileName(
                 self.iface.mainWindow(),
-                "Add to spreadsheet",
+                "Update link tracker" if choice['mode'] == 'update' else "Add to spreadsheet",
                 "",
                 "Spreadsheets (*.csv *.xlsx)",
             )
-            append = True
+            append = choice['mode'] == 'append'
         else:
             suffix = "xlsx" if choice["format"] == "xlsx" else "csv"
             label = "Excel (*.xlsx)" if suffix == "xlsx" else "CSV (*.csv)"
@@ -1252,8 +1251,8 @@ class OspConnectivityPlugin:
             append = False
         if not path:
             return
-        written = export_reports(path, choice["reports"], choice["fields"], append)
-        verb = "Added" if append else "Wrote"
+        written = export_reports(path, choice["reports"], choice["fields"], append, update=choice['mode'] == 'update')
+        verb = "Updated" if choice['mode'] == 'update' else "Added" if append else "Wrote"
         self.iface.messageBar().pushInfo("OSP Connectivity", f"{verb} {written} row(s) in {path}.")
 
     def _circuit_card(self) -> None:
@@ -1364,7 +1363,30 @@ class OspConnectivityPlugin:
     def _modify_enclosure(self, project, layers, infos, store, features, enclosure) -> None:
         tables = read_tables(layers, infos)
         model = editor_model(enclosure, features, tables, self._tolerance(project))
-        dialog = SpliceEditorDialog(model, self.iface.mainWindow())
+        def saved_route():
+            current_layers, current_infos = scan(project)
+            current_features = read_features(project, current_layers, current_infos)
+            result = trace_selection([enclosure], current_features, read_tables(current_layers, current_infos),
+                                     self._tolerance(project))
+            self._reports = list(result.get('reports') or [])
+            self._show(format_report(result))
+            self._highlight(current_layers, result.get('highlights') or {})
+            return format_report(result)
+
+        def print_saved_route():
+            saved_route()
+            self._circuit_card()
+
+        def show_saved_route():
+            try:
+                return saved_route()
+            except Exception as exc:
+                QMessageBox.warning(self.iface.mainWindow(), 'Show saved route', str(exc))
+                return str(exc)
+
+        dialog = SpliceEditorDialog(model, self.iface.mainWindow(),
+                                   show_saved_route=show_saved_route,
+                                   print_saved_route=lambda: self._run('Print saved route PDF', print_saved_route))
         if dialog.exec_() != dialog.Accepted:
             return
         edited_model = dialog.model
@@ -1443,7 +1465,10 @@ class OspConnectivityPlugin:
         layers, infos, store = ensure_switch_tables(project, layers, infos)
         tables = read_tables(layers, infos)
         existing = [text_of(row.get("sw_id")) for row in tables.get("switches") or [] if text_of(row.get("sw_id"))]
-        dialog = SwitchDialog(suggest_switch_id(existing, feature_id(idf) or ""), existing, self.iface.mainWindow())
+        idf_id = feature_id(idf) or ''
+        existing.extend(scoped_asset_id(row.get('sw_id'), idf_id) for row in switches_for_idf(idf_id, tables.get('switches') or []))
+        local_switches = [local_asset_id(value, idf_id) for value in existing if value.startswith(idf_id + '-')]
+        dialog = SwitchDialog(next_id(local_switches, 'SW-00'), existing, self.iface.mainWindow(), idf_id=idf_id)
         if dialog.exec_() != dialog.Accepted:
             return
         choice = dialog.choices()
@@ -1483,7 +1508,7 @@ class OspConnectivityPlugin:
         if errors:
             raise RuntimeError("\n".join(errors))
         self._show(
-            f"{choice['sw_id']} was added on {feature_id(idf)} with {len(ports)} ports "
+            f"{local_asset_id(choice['sw_id'], feature_id(idf))} was added on {feature_id(idf)} with {len(ports)} ports "
             f"({ports[0]['switch_port_id']} through {ports[-1]['switch_port_id']}).\n"
             "Save layer edits to keep this. Undo reverses it until then."
         )
@@ -1529,7 +1554,7 @@ class OspConnectivityPlugin:
         chooser = ChooseAssetDialog(
             "View patch panel",
             "Which patch panel would you like to view?",
-            [(choice_label(feature_id(panel), (panel.get("values") or {}).get("name")), panel) for panel in panels],
+            [(choice_label(feature_id(panel), (panel.get("values") or {}).get("name"), feature_id(idf)), panel) for panel in panels],
             self.iface.mainWindow(),
         )
         if chooser.exec_() != chooser.Accepted:
@@ -1554,7 +1579,7 @@ class OspConnectivityPlugin:
                 else:
                     lines.append(f"Cable: {port['cable_id']}")
             if port.get("switch_id"):
-                lines.append(f"Switch: {port['switch_id']}")
+                lines.append(f"Switch: {local_asset_id(port['switch_id'], feature_id(idf))}")
             if port.get("switch_port_id"):
                 lines.append(f"Switch port: {port['switch_port_id']}")
             seed = port.get("device") or port.get("cable")
@@ -1563,7 +1588,7 @@ class OspConnectivityPlugin:
                 lines.append("")
                 lines.append(format_report(traced))
             port["detail"] = "\n".join(lines)
-        inventory["title"] = choice_label(feature_id(panel), (panel.get("values") or {}).get("name"))
+        inventory["title"] = choice_label(feature_id(panel), (panel.get("values") or {}).get("name"), feature_id(idf))
         PanelViewDialog(inventory, self.iface.mainWindow()).exec_()
 
     def _view_switch(self, canvas_point):
@@ -1578,7 +1603,7 @@ class OspConnectivityPlugin:
         chooser = ChooseAssetDialog(
             "View switch",
             "Which switch would you like to view?",
-            [(choice_label(row.get("sw_id"), row.get("sw_name")), row) for row in switches],
+            [(choice_label(row.get("sw_id"), row.get("sw_name"), feature_id(idf)), row) for row in switches],
             self.iface.mainWindow(),
         )
         if chooser.exec_() != chooser.Accepted:
@@ -1595,7 +1620,7 @@ class OspConnectivityPlugin:
             if port.get("switch_port_name") and port["switch_port_name"].casefold() != port["switch_port_id"].casefold():
                 lines.append(f"Name: {port['switch_port_name']}")
             if port.get("panel_id"):
-                lines.append(f"Patch panel: {port['panel_id']}")
+                lines.append(f"Patch panel: {local_asset_id(port['panel_id'], feature_id(idf))}")
             if port.get("panel_port"):
                 lines.append(f"Panel port: {port['panel_port']}")
             panel = next((feature for feature in features if feature_id(feature) == port.get("panel_id")), None)

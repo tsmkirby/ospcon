@@ -7,18 +7,19 @@ from qgis.PyQt.QtGui import QKeySequence
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QShortcut, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QShortcut, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QPlainTextEdit,
 )
 
 from .core.catalog import feature_id
 from .core.enclosures import _range_text
 from .core.splice_editor import cable_key, fiber_usage, strict_range, validate_groups
+from .core.notation import fiber_link
 
 
 class SpliceEditorDialog(QDialog):
     COLUMNS = ("Cable A", "Fibers A", "Cable B", "Fibers B", "Type", "Status", "Tray", "Loss dB", "Notes")
 
-    def __init__(self, model, parent=None):
+    def __init__(self, model, parent=None, show_saved_route=None, print_saved_route=None):
         super().__init__(parent)
         self.model = deepcopy(model)
         self.setWindowTitle(f"Splice Editor — {feature_id(model['enclosure'])}")
@@ -55,6 +56,29 @@ class SpliceEditorDialog(QDialog):
             button.clicked.connect(callback)
             commands.addWidget(button)
         layout.addLayout(commands)
+        route_commands = QHBoxLayout()
+        self.show_route = QPushButton("Show saved route")
+        self.show_route.setEnabled(show_saved_route is not None)
+        self.show_route.setToolTip("Show stored project connections; pending editor changes are excluded.")
+        route_commands.addWidget(self.show_route)
+        self.print_route = QPushButton("Print saved route PDF")
+        self.print_route.setEnabled(print_saved_route is not None)
+        route_commands.addWidget(self.print_route)
+        layout.addLayout(route_commands)
+        self.saved_route = QPlainTextEdit()
+        self.saved_route.setReadOnly(True)
+        self.saved_route.setMaximumHeight(180)
+        self.saved_route.hide()
+        layout.addWidget(self.saved_route)
+
+        def display_saved_route():
+            self.saved_route.setPlainText("Saved project route (pending editor changes excluded)\n\n" + show_saved_route())
+            self.saved_route.show()
+
+        if show_saved_route:
+            self.show_route.clicked.connect(display_saved_route)
+        if print_saved_route:
+            self.print_route.clicked.connect(lambda: print_saved_route())
         express = QHBoxLayout()
         express.addWidget(QLabel("Express available fibers from"))
         self.express_a, self.express_b = self._cable_combo(), self._cable_combo()
@@ -294,9 +318,16 @@ class SpliceEditorDialog(QDialog):
             self.table.setRowHidden(row, bool(text and text not in str(cells).casefold()))
 
     def _copy(self):
-        lines = ['\t'.join(self.COLUMNS)]
-        for row in self._snapshot()[0]:
-            lines.append('\t'.join(str(cell[1] or '') if isinstance(cell, (tuple, list)) else str(cell) for cell in row))
+        try:
+            groups = self._groups()
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Copy splice table', str(exc))
+            return
+        lines = ['\t'.join(('Connection', *self.COLUMNS))]
+        for row, group in zip(self._snapshot()[0], groups):
+            connection = fiber_link(group['a_cable_id'], group['a_from'], group['a_to'],
+                                    group['b_cable_id'], group['b_from'], group['b_to'])
+            lines.append(connection + '\t' + '\t'.join(str(cell[1] or '') if isinstance(cell, (tuple, list)) else str(cell) for cell in row))
         QApplication.clipboard().setText('\n'.join(lines))
 
     def _save(self):

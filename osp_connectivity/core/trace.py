@@ -1,11 +1,14 @@
 """Part 3: follow a device, cable, or panel port back through splices."""
 
 from __future__ import annotations
+from uuid import uuid5, NAMESPACE_URL
 
 from .catalog import DEVICE_ROLES, build_index, feature_id, resolve_end
-from .fields import media_of, parse_count, text_of
+from .fields import media_of, parse_count, text_of, ranges_overlap, parse_range
 from .handholes import handhole_label, handholes_on_cables
 from .strands import compress_splices, strand_numbers_for
+from .notation import fiber_ranges, horizontal_link, panel_end
+from .naming import local_asset_id
 
 
 def cables_for_device(device: dict, features: list[dict], index: dict) -> list[dict]:
@@ -15,7 +18,7 @@ def cables_for_device(device: dict, features: list[dict], index: dict) -> list[d
 def trace_selection(selected: list[dict], features: list[dict], tables: dict, tolerance: float = 1.0) -> dict:
     devices = [feature for feature in selected if feature.get("role") in DEVICE_ROLES]
     cables = [feature for feature in selected if feature.get("role") == "cable"]
-    anchors = [feature for feature in selected if feature.get("role") in ("idf", "patch_panel", "fdp")]
+    anchors = [feature for feature in selected if feature.get("role") in ("idf", "patch_panel", "fdp", "splice_enc")]
     if devices:
         targets = devices
         kind = "device"
@@ -29,7 +32,7 @@ def trace_selection(selected: list[dict], features: list[dict], tables: dict, to
         return {
             "reports": [],
             "highlights": _empty_highlights(),
-            "warnings": ["Select an AP, camera, jack, cable, IDF, or panel."],
+            "warnings": ["Select an AP, camera, jack, cable, IDF, panel, or splice enclosure."],
         }
 
     reports = []
@@ -63,6 +66,8 @@ def _format_one(report: dict) -> str:
     lines = []
     if report.get("device_id"):
         lines.append(f"Device: {report['device_id']}")
+    if report.get('associated_devices'):
+        lines.append('Associated devices: ' + ', '.join(report['associated_devices']))
     if report.get("pole_id"):
         lines.append(f"Pole: {report['pole_id']}")
     if report.get("cable_id"):
@@ -80,10 +85,16 @@ def _format_one(report: dict) -> str:
     if report.get("idf_id"):
         lines.append(f"IDF: {report['idf_id']}")
     if report.get("panel_id") or report.get("panel_port"):
-        port = f"  port {report['panel_port']}" if report.get("panel_port") else ""
-        lines.append(f"Panel: {report.get('panel_id') or ''}{port}".rstrip())
+        lines.append("Panel: " + panel_end(report.get('panel_id'), report.get('panel_port')))
+    if report.get("horizontal_link"):
+        lines.append("Horizontal link: " + report['horizontal_link'])
+    elif report.get('switch_id'):
+        lines.append('Switch: ' + report['switch_id'] + ' ' + (report.get('switch_port') or ''))
     for hop_line in report.get("strand_lines") or []:
         lines.append(hop_line)
+    if report.get("splice_lines"):
+        lines.append("Saved route splices (all associated fibers):")
+        lines.extend(report['splice_lines'])
     for warning in report.get("warnings") or []:
         lines.append(f"Warning: {warning}")
     return "\n".join(lines)
@@ -153,6 +164,21 @@ def _trace_anchor(anchor: dict, features: list[dict], tables: dict, tolerance: f
     index = build_index(features)
     identifier = feature_id(anchor)
     reports = []
+    if anchor.get("role") == "splice_enc":
+        from .splice_editor import editor_model
+        model = editor_model(anchor, features, tables, tolerance)
+        for cable in model['cables']:
+            if not cable.get('missing'):
+                reports.extend(_trace_cable(cable, features, tables, tolerance))
+        if not reports:
+            reports = [{"warnings": [f"No saved cables on {identifier}."],
+                        'splice_lines': compress_splices(model['original']), 'highlights': _empty_highlights()}]
+        for report in reports:
+            if identifier not in report.setdefault('enclosures', []):
+                report['enclosures'].append(identifier)
+            if _ref(anchor) not in report['highlights']['enclosures']:
+                report['highlights']['enclosures'].append(_ref(anchor))
+        return reports
     if anchor.get("role") == "idf":
         for cable in features:
             if cable.get("role") != "cable":
@@ -236,20 +262,27 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
     strand_lines = []
     enclosure_refs = []
     rows = []
+    numbers = []
     if media == "fiber":
-        numbers = []
         if circuit and circuit.get("strand_from"):
             start = int(circuit["strand_from"])
             end = int(circuit.get("strand_to") or start)
             numbers = list(range(start, end + 1))
         if not numbers:
-            numbers = strand_numbers_for(values) or strand_numbers_for((device or {}).get("values") or {})
+            if device:
+                numbers = parse_range(((device or {}).get('values') or {}).get('port'))
+                if not numbers and device_end:
+                    numbers = parse_range(values.get('a_port' if device_end == 'a_end' else 'z_port'))
+                if not numbers:
+                    warnings.append('Circuit strand assignment is unknown; the circuit route cannot be fully determined.')
+            else:
+                numbers = strand_numbers_for(values)
         if numbers and parse_count(values.get("strand_count")) and max(numbers) > parse_count(values.get("strand_count")):
             warnings.append(f"Strand list exceeds the strand count on {identifier}.")
         rows = _walk_strands(identifier, numbers, tables.get("splices") or [])
         strand_lines = compress_splices(rows) if rows else []
         if numbers and not strand_lines:
-            strand_lines = [f"{identifier} strands {numbers[0]}-{numbers[-1]}" if len(numbers) > 1 else f"{identifier} strand {numbers[0]}"]
+            strand_lines = fiber_ranges(identifier, numbers)
         seen_enc = set()
         for row in rows:
             enc_id = text_of(row.get("splice_enc_id"))
@@ -267,6 +300,68 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
         length = f"{values.get('length_m')} m"
 
     cable_ids, enclosure_ids = linked_fiber(identifier, features, tables, index)
+    associated_ids = {item.casefold() for item in cable_ids}
+    route_splices = [row for row in tables.get('splices') or []
+                    if any((text_of(row.get(f'{side}_cable_id')) or '').casefold() in associated_ids
+                           for side in ('a', 'b'))] if media == 'fiber' else []
+    splice_lines = compress_splices(route_splices)
+    path_cables = [item for item in features if item.get('role') == 'cable'
+                   and (feature_id(item) or '').casefold() in associated_ids] or [cable]
+    route_idfs, route_panels = {}, set()
+    for segment in path_cables:
+        segment_values = segment.get('values') or {}
+        for side in ('a', 'z'):
+            hits = resolve_end(index, segment_values.get(f'{side}_end'), segment)
+            for hit in hits:
+                if hit.get('role') == 'idf':
+                    route_idfs[_ref(hit)] = hit
+                    if text_of(segment_values.get(f'{side}_panel')):
+                        route_panels.add((text_of(segment_values.get(f'{side}_panel')),
+                                          text_of(segment_values.get(f'{side}_port'))))
+    if not idf_hit and len(route_idfs) == 1:
+        idf_hit = next(iter(route_idfs.values()))
+    if not panel and len(route_panels) == 1:
+        panel, port = next(iter(route_panels))
+    if len(route_idfs) > 1:
+        warnings.append('Associated route has multiple IDFs: ' + ', '.join(feature_id(item) for item in route_idfs.values()))
+    idf_id = feature_id(idf_hit) if idf_hit else (text_of(circuit.get('idf_id')) if circuit else None)
+    panel_feature = _find_id(features, panel, {'patch_panel', 'fdp'})
+    idf_id = idf_id or text_of(((panel_feature or {}).get('values') or {}).get('idf_ref'))
+    patches = [row for row in tables.get('patches') or []
+               if (text_of(row.get('panel_id')) or '').casefold() == (panel or '').casefold()
+               and ranges_overlap(row.get('panel_port'), port)
+               and (not idf_id or not text_of(row.get('mdf_idf_id'))
+                    or text_of(row.get('mdf_idf_id')).casefold() == idf_id.casefold())
+               and (text_of(row.get('media_type')) or 'copper').casefold() == media]
+    patch_rooms = {text_of(row.get('mdf_idf_id')) for row in patches if text_of(row.get('mdf_idf_id'))}
+    if not idf_id and len(patch_rooms) == 1:
+        idf_id = next(iter(patch_rooms))
+    copper_link = None
+    if media == 'copper':
+        related = [item for item in features if item.get('role') in DEVICE_ROLES
+                   and any(_ref(hit) == _ref(cable) for hit in _cables_for_device(item, features, index))]
+        if device and not any(_ref(item) == _ref(device) for item in related):
+            related.append(device)
+        jacks = list(dict.fromkeys(feature_id(item) for item in related if item.get('role') == 'data_jack'))
+        endpoints = list(dict.fromkeys(feature_id(item) for item in related if item.get('role') != 'data_jack'))
+        links = []
+        for patch in patches or [{}]:
+            sw_id = text_of(patch.get('sw_id'))
+            sw_port = text_of(patch.get('switch_port_id'))
+            switch = next((row for row in tables.get('switches') or []
+                           if sw_id and (text_of(row.get('sw_id')) or '').casefold() == sw_id.casefold()), {})
+            room = idf_id or text_of(patch.get('mdf_idf_id')) or text_of(switch.get('mdf_idf_id'))
+            idf_id = idf_id or room
+            links.append(horizontal_link(room, sw_id, sw_port, panel, port, identifier,
+                                         text_of(values.get('cable_type')) or text_of(values.get('media')),
+                                         jacks, endpoints))
+            if not all((room, sw_id, sw_port, panel, port)):
+                warnings.append('Horizontal link is incomplete: IDF, switch, switch port, panel, or panel port is missing.')
+        if not jacks and not endpoints:
+            warnings.append('Horizontal link has no recorded data jack or endpoint device.')
+        if len(patches) > 1:
+            warnings.append('Multiple switch patches are recorded for this panel port; all are shown.')
+        copper_link = ' | '.join(dict.fromkeys(links))
     ducts = []
     for cable_name in cable_ids:
         for label in _duct_labels(cable_name, "", tables.get("routes") or []):
@@ -284,11 +379,6 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
         enc = _find_id(features, enc_id, {"splice_enc"})
         if enc and _ref(enc) not in enclosure_refs:
             enclosure_refs.append(_ref(enc))
-    path_cables = [
-        feature
-        for feature in features
-        if feature.get("role") == "cable" and feature_id(feature) and feature_id(feature).casefold() in {item.casefold() for item in cable_ids}
-    ] or [cable]
     handhole_features = handholes_on_cables(
         path_cables,
         [feature for feature in features if feature.get("role") == "handhole"],
@@ -316,24 +406,90 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
         found = _find_id(features, name, {"handhole"})
         if found and _ref(found) not in handhole_refs:
             handhole_refs.append(_ref(found))
+    route_devices = {}
+    for segment in path_cables:
+        for side in ('a', 'z'):
+            for hit in resolve_end(index, (segment.get('values') or {}).get(f'{side}_end'), segment):
+                if hit.get('role') in DEVICE_ROLES:
+                    route_devices[_ref(hit)] = hit
+    for item in features:
+        if item.get('role') in DEVICE_ROLES and (text_of((item.get('values') or {}).get('cable_ref')) or '').casefold() in associated_ids:
+            route_devices[_ref(item)] = item
+    if device:
+        route_devices[_ref(device)] = device
     highlights = {
         "cables": highlighted or [_ref(cable)],
-        "devices": [_ref(device)] if device else [],
-        "idfs": [_ref(idf_hit)] if idf_hit else [],
+        "devices": list(route_devices),
+        "idfs": list(dict.fromkeys([*route_idfs, *([_ref(idf_hit)] if idf_hit else [])])),
         "enclosures": enclosure_refs,
         "handholes": handhole_refs,
     }
+    # Circuit-only route data deliberately excludes other cables sharing an enclosure.
+    circuit_ids = list(dict.fromkeys([identifier, *[row.get(f'{side}_cable_id')
+                        for row in rows for side in ('a', 'b') if row.get(f'{side}_cable_id')]]))
+    circuit_set = {name.casefold() for name in circuit_ids}
+    circuit_cables = [item for item in path_cables if (feature_id(item) or '').casefold() in circuit_set]
+    circuit_encs = list(dict.fromkeys(row['splice_enc_id'] for row in rows if row.get('splice_enc_id')))
+    for row in tables.get('memberships') or []:
+        if (text_of(row.get('cable_id')) or '').casefold() in circuit_set:
+            enc_id = text_of(row.get('splice_enc_id'))
+            if enc_id and enc_id not in circuit_encs:
+                circuit_encs.append(enc_id)
+    # An enclosure can be present at a cable end even without a saved splice row.
+    for item in circuit_cables:
+        for side in ('a', 'z'):
+            for hit in resolve_end(index, (item.get('values') or {}).get(f'{side}_end'), item):
+                if hit.get('role') == 'splice_enc' and feature_id(hit) not in circuit_encs:
+                    circuit_encs.append(feature_id(hit))
+    circuit_hhs = [handhole_label(item) for item in handholes_on_cables(
+        circuit_cables, [item for item in features if item.get('role') == 'handhole'], tolerance)]
+    for row in tables.get('handholes') or []:
+        if (text_of(row.get('cable_id')) or '').casefold() in circuit_set and text_of(row.get('handhole_id')):
+            circuit_hhs.append(text_of(row['handhole_id']))
+    circuit_ducts = list(dict.fromkeys(label for name in circuit_ids
+                         for label in _duct_labels(name, '', tables.get('routes') or [])))
+    hop_groups = {}
+    for row in rows:
+        key = tuple(row.get(name) for name in ('a_cable_id', 'b_cable_id', 'splice_enc_id',
+                                             'splice_type', 'a_layer_id', 'b_layer_id'))
+        hop_groups.setdefault(key, []).append(row)
+    ordered_splices = [line for group in hop_groups.values() for line in compress_splices(group)]
+    def tracking_value(*keys):
+        return next((text_of(source.get(key)) for source in (circuit or {}, values) for key in keys
+                     if text_of(source.get(key))), '')
+
+    installation_status = next((value for value in
+                               (tracking_value('installation_status', 'install_status'),
+                                text_of((circuit or {}).get('status')), text_of(values.get('status')))
+                               if value and value.casefold() != 'proposed'), '')
     return {
+        "link_id": 'L-' + uuid5(NAMESPACE_URL, repr((cable.get('layer_id') or '',
+                   text_of((circuit or {}).get('circuit_id')) or
+                   (f'ckt.{feature_id(device)}.{identifier}' if device else identifier)))).hex,
+        "media": media,
+        "installation_status": installation_status,
+        "test_result": tracking_value('test_result', 'test_results'),
+        "completion_date": tracking_value('completion_date', 'installation_date', 'install_date'),
+        "circuit_route": {'segments': circuit_ids, 'enclosures': circuit_encs,
+                          'handholes': list(dict.fromkeys(circuit_hhs)), 'ducts': circuit_ducts,
+                          'splices': ordered_splices},
+        "switch_id": ' | '.join(dict.fromkeys(local_asset_id(row.get('sw_id'), idf_id) for row in patches if text_of(row.get('sw_id')))),
+        "switch_port": ' | '.join(dict.fromkeys(text_of(row.get('switch_port_id')) for row in patches if text_of(row.get('switch_port_id')))),
+        "jack_id": ' | '.join(jacks) if media == 'copper' else '',
         "device_id": feature_id(device) if device else None,
+        "associated_devices": list(dict.fromkeys(feature_id(item) for item in route_devices.values())),
         "pole_id": pole_id,
         "cable_id": identifier,
         "cable_type": text_of(values.get("cable_type")) or text_of(values.get("media")),
         "length": length,
         "ducts": ducts,
-        "idf_id": feature_id(idf_hit) if idf_hit else (text_of(circuit.get("idf_id")) if circuit else None),
-        "panel_id": panel,
+        "idf_id": idf_id,
+        "horizontal_link": copper_link,
+        "panel_id": local_asset_id(panel, idf_id),
+        "panel_key": panel,
         "panel_port": port,
-        "strand_lines": strand_lines,
+        "strand_lines": ordered_splices or strand_lines,
+        "splice_lines": splice_lines,
         "segments": cable_ids if len(cable_ids) > 1 else [],
         "enclosures": enclosure_ids,
         "handholes": handhole_ids,
@@ -391,6 +547,8 @@ def linked_fiber(start_id: str, features: list[dict], tables: dict, index: dict)
         for row in splices:
             a_cable = text_of(row.get("a_cable_id"))
             b_cable = text_of(row.get("b_cable_id"))
+            if current.casefold() in ((a_cable or '').casefold(), (b_cable or '').casefold()):
+                add_enclosure(row.get('splice_enc_id'))
             if (a_cable or "").casefold() == current.casefold() and b_cable:
                 queue.append(b_cable)
                 add_enclosure(row.get("splice_enc_id"))
@@ -460,10 +618,14 @@ def _walk_strands(cable_id: str, numbers: list[int], splices: list[dict]) -> lis
                 next_cable = text_of(splice.get(f"{other}_cable_id"))
                 next_number = splice.get(f"{other}_strand_no")
                 next_number = int(next_number) if next_number not in (None, "") else None
+                if (splice.get('splice_type') or '').upper() == 'OPEN':
+                    next_cable, next_number = None, None
                 rows.append({"a_cable_id": current, "a_strand_no": number,
                              "b_cable_id": next_cable, "b_strand_no": next_number,
                              "splice_type": splice.get("splice_type") or "splice",
-                             "splice_enc_id": splice.get("splice_enc_id")})
+                             "splice_enc_id": splice.get("splice_enc_id"),
+                             "a_layer_id": splice.get('b_layer_id' if other == 'a' else 'a_layer_id'),
+                             "b_layer_id": splice.get(f'{other}_layer_id')})
                 if (splice.get("splice_type") or "").upper() != "OPEN" and next_cable and next_number:
                     pending.append((next_cable, next_number))
     return rows
@@ -472,7 +634,7 @@ def _walk_strands(cable_id: str, numbers: list[int], splices: list[dict]) -> lis
 def _duct_labels(cable_id: str, layer_id: str, routes: list[dict]) -> list[str]:
     matched = []
     for route in routes:
-        if text_of(route.get("cable_id")) and text_of(route.get("cable_id")).casefold() != (cable_id or "").casefold():
+        if not text_of(route.get("cable_id")) or text_of(route.get("cable_id")).casefold() != (cable_id or "").casefold():
             continue
         route_layer = text_of(route.get("cable_source_layer_id") or route.get("cable_layer_id"))
         if route_layer and layer_id and route_layer != layer_id:

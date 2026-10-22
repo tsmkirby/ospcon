@@ -21,6 +21,51 @@ class QgisEditorTests(unittest.TestCase):
         cls.app = QgsApplication.instance() or QgsApplication([], False)
         cls.app.initQgis()
 
+    def test_new_panels_and_switches_have_idf_scoped_keys_and_local_labels(self):
+        from osp_connectivity.dialogs import PatchPanelDialog, SwitchDialog, PatchDialog
+        from osp_connectivity.tests.test_core import feature
+        panel = PatchPanelDialog('IDF102', [], {'copper': 'PP-01'}, ['IDF101-PP-01'], [])
+        panel._accept()
+        self.assertEqual(panel.choices()[0]['panel_id'], 'IDF102-PP-01')
+        switch = SwitchDialog('SWITCH01', ['IDF101-SWITCH01'], idf_id='IDF102')
+        switch._accept()
+        self.assertEqual(switch.choices()['sw_id'], 'IDF102-SWITCH01')
+        self.assertEqual(switch.identifier.text(), 'SWITCH01')
+        idf = feature('idf', 1, 'IDF102')
+        pp = feature('patch_panel', 2, 'IDF102-PP-01', {'idf_ref': 'IDF102', 'port_count': 12})
+        patches = PatchDialog([idf], [pp], {'switches': [dict(sw_id='IDF102-SWITCH01', mdf_idf_id='IDF102')]})
+        self.assertEqual(patches.panel.currentText(), 'PP-01')
+        self.assertEqual(patches.panel.currentData()['id'], 'IDF102-PP-01')
+        self.assertEqual(patches.switch.currentText(), 'SWITCH01')
+        self.assertEqual(patches.switch.currentData()['sw_id'], 'IDF102-SWITCH01')
+        for dialog in (panel, switch, patches):
+            dialog.deleteLater()
+
+    def test_saved_route_buttons_do_not_apply_pending_splice_edits(self):
+        from unittest.mock import Mock
+        from qgis.PyQt.QtWidgets import QApplication
+        from osp_connectivity.core.splice_editor import editor_model
+        from osp_connectivity.splice_dialog import SpliceEditorDialog
+        from osp_connectivity.tests.test_splice_editor import sample
+        enclosure, cables, rows = sample()
+        model = editor_model(enclosure, cables, {'splices': rows})
+        show, print_pdf = Mock(return_value='A:1-144 ↔︎ B:1-144 (express @ EN-1)'), Mock()
+        dialog = SpliceEditorDialog(model, show_saved_route=show, print_saved_route=print_pdf)
+        dialog._copy()
+        self.assertIn('A:1-144 ↔︎ B:1-144', QApplication.clipboard().text())
+        dialog._delete()  # no selected rows; the saved model must remain untouched
+        dialog._add()
+        pending = dialog._snapshot()
+        dialog.show_route.click()
+        dialog.print_route.click()
+        show.assert_called_once_with()
+        print_pdf.assert_called_once_with()
+        self.assertEqual(dialog._snapshot(), pending)
+        self.assertEqual(model['original'], rows)
+        self.assertIn('pending editor changes excluded', dialog.saved_route.toPlainText())
+        self.assertEqual(dialog.result(), 0)
+        dialog.deleteLater()
+
     def test_dialog_undo_restores_the_cable_choices_and_native_attributes(self):
         from osp_connectivity.core.splice_editor import editor_model, splice_changes
         from osp_connectivity.splice_dialog import SpliceEditorDialog
