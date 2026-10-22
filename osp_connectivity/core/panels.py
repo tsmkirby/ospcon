@@ -74,11 +74,21 @@ def panel_ports(panel: dict, features: list[dict], tables: dict | None = None) -
         feature_values = feature.get("values") or {}
         if feature.get("role") in DEVICE_ROLES and _same_text(feature_values.get("panel"), panel_id):
             claim(feature_values.get("port"), device=feature)
+    terminations = [row for row in tables.get("terminations") or []
+                    if _same_text(row.get("pp_id") or row.get("fdp_id") or row.get("panel_id"), panel_id)]
+    # A cable with strand terminations here is placed by them, not by its end's port or strand count.
+    stranded = {(text_of(row.get("cable_id")) or "").casefold() for row in terminations
+                if text_of(row.get("cable_id")) and row.get("strand_no") not in (None, "")}
     for cable, numbers in _rear_assignments(panel_id, features):
+        if (feature_id(cable) or "").casefold() in stranded:
+            continue
         claim(numbers, cable=cable, device=_device_on_cable(cable, features), span=_format_ports(numbers))
-    for row in tables.get("terminations") or []:
-        if _same_text(row.get("pp_id") or row.get("fdp_id") or row.get("panel_id"), panel_id):
-            claim(row.get("panel_port") or row.get("panel_position") or row.get("port"))
+    for row in terminations:
+        cable = _find_feature(features, row.get("cable_id"), {"cable"})
+        port = row.get("panel_port") or row.get("panel_position") or row.get("port")
+        strand = row.get("strand_no")
+        span = f"strand {int(float(strand))}" if strand not in (None, "") and cable is not None else None
+        claim(port, cable=cable, span=span)
     for row in tables.get("circuits") or []:
         if not _same_text(row.get("panel_id"), panel_id):
             continue

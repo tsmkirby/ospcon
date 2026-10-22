@@ -370,7 +370,8 @@ def read_tables(layers: dict, infos: list) -> dict:
             continue
         for qgs_feature in layer.getFeatures():
             row = {field.name(): plain(qgs_feature[field.name()]) for field in layer.fields()}
-            if bucket in ("handholes", "circuits", "splices", "memberships", "switches", "switch_ports", "patches"):
+            if bucket in ("handholes", "circuits", "splices", "memberships", "switches", "switch_ports", "patches",
+                          "terminations"):
                 row["_fid"] = qgs_feature.id()
                 row["_layer_id"] = info.layer_id
             tables[bucket].append(row)
@@ -483,6 +484,23 @@ def ensure_project(project: QgsProject, layers: dict, infos: list):
             store.setdefault(info.role, layers[info.layer_id])
     _register_strand_relation(project, store, infos)
     return layers, infos, store
+
+
+def ensure_fiber_terminations(project: QgsProject, layers: dict, infos: list):
+    """The fiber termination table, created beside the project when it has none. Returns the layer."""
+    for info in infos:
+        if info.role == "fiber_termination":
+            return layers[info.layer_id]
+    target = _sidecar_path(project)
+    if not target:
+        raise RuntimeError("Save the QGIS project before adding fiber terminations.")
+    layer_name, title, wkb, fields = _layer_specs(project)["fiber_termination"]
+    _write_layer(project, target, layer_name, title, wkb, fields)
+    layers, infos = scan(project)
+    for info in infos:
+        if info.role == "fiber_termination":
+            return layers[info.layer_id]
+    raise RuntimeError("The fiber termination table could not be added.")
 
 
 def apply_edits(session: EditSession, layers: dict, infos: list, edits: list) -> list[str]:
@@ -967,7 +985,17 @@ def _layer_specs(project: QgsProject):
         text("switch_port_name"),
         text("status"),
     ]
+    # Same fields as the template's fiber_terminations table.
+    termination_fields = [
+        text("cable_id"),
+        integer("strand_no"),
+        text("fdp_id"),
+        text("panel_position"),
+        text("connector_type"),
+        text("status"),
+    ]
     return {
+        "fiber_termination": ("osp_fiber_terminations", "OSP Fiber Terminations", "None", termination_fields),
         "fiber_strand": ("osp_fiber_strands", "OSP Fiber Strands", "None", strand_fields),
         "fiber_splice": ("osp_fiber_splices", "OSP Fiber Splices", "None", splice_fields),
         "cable_route": ("osp_cable_routes", "OSP Cable Routes", "None", route_fields),

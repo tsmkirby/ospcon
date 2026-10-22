@@ -316,6 +316,120 @@ class QgisEditorTests(unittest.TestCase):
         project.removeAllMapLayers()
         dialog.deleteLater()
 
+    def _termination_project(self):
+        from qgis.core import QgsGeometry, QgsPointXY
+        from osp_connectivity.bridge import scan
+        project = QgsProject()
+        cables = QgsVectorLayer('LineString?crs=EPSG:3857&field=cable_id:string&field=media_type:string'
+                                '&field=strand_count:integer&field=a_end:string&field=z_end:string'
+                                '&field=a_end_panel_id:string&field=z_end_panel_id:string'
+                                '&field=a_end_port:string&field=z_end_port:string', 'cables', 'memory')
+        panels = QgsVectorLayer('Point?crs=EPSG:3857&field=pp_id:string&field=mdf_idf_id:string&field=port_count:integer', 'pp', 'memory')
+        fdps = QgsVectorLayer('Point?crs=EPSG:3857&field=fdp_id:string&field=mdf_idf_id:string&field=position_count:integer', 'fdp', 'memory')
+        aps = QgsVectorLayer('Point?crs=EPSG:3857&field=ap_id:string&field=cable_id:string'
+                             '&field=patch_panel_id:string&field=patch_panel_port:string', 'ap', 'memory')
+        terms = QgsVectorLayer('None?field=cable_id:string&field=strand_no:integer&field=fdp_id:string'
+                               '&field=panel_position:string&field=status:string', 'fiber_terminations', 'memory')
+        rows = [(cables, {'cable_id': 'CB-01', 'media_type': 'copper', 'a_end': 'AP-01', 'z_end': 'IDF-1',
+                          'z_end_panel_id': 'PP-01', 'z_end_port': '1'}, [(0, 0), (10, 0)]),
+                (cables, {'cable_id': 'F-1', 'media_type': 'fiber', 'strand_count': 12, 'a_end': 'IDF-1',
+                          'a_end_panel_id': 'FD-01', 'z_end': 'EN-1'}, [(0, 0), (0, 10)]),
+                (panels, {'pp_id': 'PP-01', 'mdf_idf_id': 'IDF-1', 'port_count': 24}, [(0, 0)]),
+                (fdps, {'fdp_id': 'FD-01', 'mdf_idf_id': 'IDF-1', 'position_count': 24}, [(0, 0)]),
+                (aps, {'ap_id': 'AP-01', 'cable_id': 'CB-01', 'patch_panel_id': 'PP-01', 'patch_panel_port': '1'}, [(10, 0)])]
+        for layer, values, coords in rows:
+            feature = QgsFeature(layer.fields())
+            for key, value in values.items():
+                feature[key] = value
+            points = [QgsPointXY(*xy) for xy in coords]
+            feature.setGeometry(QgsGeometry.fromPointXY(points[0]) if len(points) == 1 else QgsGeometry.fromPolylineXY(points))
+            self.assertTrue(layer.dataProvider().addFeatures([feature])[0])
+        for layer in (cables, panels, fdps, aps, terms):
+            project.addMapLayer(layer)
+        layers, infos = scan(project)
+        roles = {info.role for info in infos}
+        self.assertTrue({'cable', 'patch_panel', 'fdp', 'ap', 'fiber_termination'} <= roles, roles)
+        return project, cables, aps, terms
+
+    def _plugin(self):
+        from osp_connectivity.plugin import OspConnectivityPlugin
+        class Canvas:
+            def refresh(self):
+                pass
+        class Iface:
+            def mainWindow(self):
+                return None
+            def mapCanvas(self):
+                return Canvas()
+        plugin = OspConnectivityPlugin(Iface())
+        plugin._show = lambda text: None
+        return plugin
+
+    def test_modify_copper_terminations_moves_the_cable_and_its_device_with_one_undo(self):
+        from unittest.mock import patch
+        from osp_connectivity.bridge import read_features, scan
+        from osp_connectivity.termination_dialog import CopperTerminationDialog
+        project, cables, aps, _terms = self._termination_project()
+        layers, infos = scan(project)
+        panel = next(item for item in read_features(project, layers, infos) if item['role'] == 'patch_panel')
+
+        def run(dialog):
+            dialog.editors[0].setText('12')
+            self.assertTrue(dialog.buttons.button(dialog.buttons.Save).isEnabled())
+            dialog._save()
+            return dialog.result()
+
+        with patch.object(CopperTerminationDialog, 'exec_', run):
+            self.assertTrue(self._plugin()._modify_terminations(project, panel, 'PP-01'))
+        copper = next(f for f in cables.getFeatures() if f['cable_id'] == 'CB-01')
+        self.assertEqual(copper['z_end_port'], '12')
+        self.assertEqual(next(aps.getFeatures())['patch_panel_port'], '12')
+        cables.undoStack().undo()
+        aps.undoStack().undo()
+        self.assertEqual(next(f for f in cables.getFeatures() if f['cable_id'] == 'CB-01')['z_end_port'], '1')
+        for layer in (cables, aps):
+            layer.rollBack()
+
+    def test_modify_fiber_terminations_adds_strands_on_new_positions(self):
+        from unittest.mock import patch
+        from osp_connectivity.bridge import read_features, read_tables, scan
+        from osp_connectivity.core.panels import panel_ports
+        from osp_connectivity.termination_dialog import FiberTerminationDialog
+        project, _cables, _aps, terms = self._termination_project()
+        layers, infos = scan(project)
+        panel = next(item for item in read_features(project, layers, infos) if item['role'] == 'fdp')
+
+        def run(dialog):
+            self.assertEqual(dialog.cable.count(), 1)
+            dialog.strand_from.setValue(1)
+            dialog.strand_to.setValue(2)
+            dialog.port.setValue(13)
+            dialog._add()
+            self.assertEqual(dialog.pending_table.rowCount(), 1)
+            dialog._save()
+            return dialog.result()
+
+        with patch.object(FiberTerminationDialog, 'exec_', run):
+            self.assertTrue(self._plugin()._modify_terminations(project, panel, 'FD-01'))
+        saved = sorted((f['cable_id'], f['strand_no'], f['panel_position']) for f in terms.getFeatures())
+        self.assertEqual(saved, [('F-1', 1, '13'), ('F-1', 2, '14')])
+        layers, infos = scan(project)
+        features = read_features(project, layers, infos)
+        fdp = next(item for item in features if item['role'] == 'fdp')
+        ports = panel_ports(fdp, features, read_tables(layers, infos))['ports']
+        self.assertEqual([port['number'] for port in ports if port['occupied']], [13, 14])
+
+        def remove(dialog):
+            dialog.current.selectRow(0)
+            dialog._mark(True)
+            dialog._save()
+            return dialog.result()
+
+        with patch.object(FiberTerminationDialog, 'exec_', remove):
+            self.assertTrue(self._plugin()._modify_terminations(project, fdp, 'FD-01'))
+        self.assertEqual(terms.featureCount(), 0)
+        terms.rollBack()
+
     def test_toolbar_buttons_have_square_icons_and_accessible_names(self):
         from osp_connectivity.plugin import OspConnectivityPlugin
         class Iface:

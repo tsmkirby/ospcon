@@ -1085,8 +1085,11 @@ class ChooseAssetDialog(QDialog):
 class PanelViewDialog(QDialog):
     """A grid of one panel's ports. Occupied ports open the device and cable."""
 
-    def __init__(self, inventory: dict, parent=None):
+    MODIFIED = 2  # exec_ result when terminations were changed and the view should be rebuilt
+
+    def __init__(self, inventory: dict, parent=None, modify=None):
         super().__init__(parent)
+        self._modify = modify
         panel_id = inventory.get("title") or inventory.get("panel_id") or "Patch panel"
         self.setWindowTitle(str(panel_id))
         self.resize(720, 520)
@@ -1129,7 +1132,15 @@ class PanelViewDialog(QDialog):
         layout.addWidget(self.detail)
         close = QDialogButtonBox(QDialogButtonBox.Close)
         close.rejected.connect(self.reject)
+        if modify is not None:
+            button = close.addButton("Modify terminations…", QDialogButtonBox.ActionRole)
+            button.setToolTip("Change the port each copper cable lands on, or terminate fiber strands on positions.")
+            button.clicked.connect(self._modify_clicked)
         layout.addWidget(close)
+
+    def _modify_clicked(self) -> None:
+        if self._modify():
+            self.done(self.MODIFIED)
 
     def _show(self, port: dict) -> None:
         self.detail.setText(port.get("detail") or f"Port {port.get('number')} is open.")

@@ -44,7 +44,7 @@ The **OSP Connectivity** toolbar uses compact square icons. Hover over an icon t
 | Trace selection | Follows the selected device, cable, or IDF and highlights the path. |
 | Add fiber enclosure | Click a fiber cable. The cable is split and you choose which strands are spliced. If cables are selected, only the selected cables are split or linked. |
 | Add patch panel | Click an IDF. A copper cable gets a copper panel and a fiber cable gets a fiber panel, with the port and ends recorded in the dialog. A new panel asks for its port count and is stored on that IDF. |
-| View patch panel | Click an IDF, then choose one of its patch panels. Every port is shown. Click a port to see the rear cable and any switch patch on it. |
+| View patch panel | Click an IDF, then choose one of its patch panels. Every port is shown. Click a port to see the rear cable and any switch patch on it. **Modify terminations** changes which ports cables or fiber strands land on. |
 | View switch | Click an IDF, then choose one of its switches. Patched ports show the panel and port. |
 | Add switch | Click an IDF. Creates the switch, with ports such as `gi1/0/1`, on that IDF. |
 | Patching | Cross-connect an open patch-panel port to an open switch port at the same IDF. |
@@ -207,7 +207,19 @@ Choose **Add patch panel**, then click an IDF. Enter a panel id that is not alre
 
 Choose **View patch panel** and click an IDF. The dialog asks which patch panel to view and lists each one by its id, with the panel name beside it when the panel has a name. The next dialog draws every port. Ports with a cable, device, or switch patch are blue. Click one to see the rear cable and the switch patch when that port has one, with the trace for the cable.
 
-A copper panel has one rear cable per port. A fiber panel can have several rear cables. Each fiber cable takes a run of ports equal to its strand count when the cable does not already name ports: a 72-strand cable on ports 1-72, and the next 72-strand cable on ports 73-144. Fiber ports are paired 1-2, 3-4, and so on, unless the panel's topology attribute is `simplex`.
+A copper panel has one rear cable per port. A fiber panel can have several rear cables. Each fiber cable takes a run of ports equal to its strand count when the cable does not already name ports: a 72-strand cable on ports 1-72, and the next 72-strand cable on ports 73-144. Fiber ports are paired 1-2, 3-4, and so on, unless the panel's topology attribute is `simplex`. A fiber cable with strand terminations on the panel is placed by those terminations instead.
+
+#### Modify terminations
+
+Click **Modify terminations…** in the panel view. A panel is treated as fiber when it is an FDP, is marked fiber, or every cable landing on it is fiber; otherwise it is copper. When you save, the panel view reopens with the new ports. The change is one edit on each layer it touches, so Undo reverses it until layer edits are saved.
+
+**Copper.** Every cable with an end on the panel is listed with its current port. Type a new port, such as `12`, for any cable and save. Two cables can swap ports. A port taken by a device or termination that does not move with these cables is refused, as is a port beyond the panel's port count. Moving a cable also moves:
+
+- the panel port on devices served by that cable
+- circuit and copper termination records for that cable on this panel
+- switch patches on the old port, so each circuit stays on the same switch port. Clear **Move switch patches** to leave the patch cords where they are.
+
+**Fiber.** The top list shows the strand terminations already on the panel, grouped into ranges. Select some and choose **Remove selected** to take them off. To add more, choose a cable, its strands, and the first port, then **Add to list**; repeat for more ranges or more cables. Cables that land on the panel are listed first, then fiber cables that end at the panel's IDF. The next unterminated strands and the next free run of ports are filled in for you, and the free ports are listed. A strand already terminated on the panel, a port already used, and a port beyond the panel's position count are refused. Each strand is saved as a row in the fiber terminations table, which is created beside the project if it has none. When a cable's end at the IDF has no panel yet, it is set to this panel.
 
 ### View switch
 

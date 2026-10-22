@@ -48,6 +48,7 @@ from .bridge import (
     apply_plain_edits,
     delete_features,
     update_feature_fields,
+    ensure_fiber_terminations,
     ensure_id_field,
     ensure_panel_layer,
     ensure_project,
@@ -71,6 +72,16 @@ from .core.fields import enclosure_id_from_prefix, mapped_values, media_of, next
 from .core.geometry import distance
 from .core.link import RowInsert, plan_links
 from .core.panels import panel_feature_ids, panel_ports
+from .core.terminations import (
+    blocked_ports,
+    copper_changes,
+    copper_rows,
+    fiber_additions,
+    fiber_candidates,
+    fiber_terminations,
+    panel_capacity,
+    panel_media,
+)
 from .core.place import (
     cable_layer_choices,
     device_layer_choices,
@@ -110,6 +121,7 @@ from .dialogs import (
 )
 from .mapimage import render_circuit_jpegs
 from .splice_dialog import SpliceEditorDialog
+from .termination_dialog import CopperTerminationDialog, FiberTerminationDialog
 
 
 class SketchTool(QgsMapToolCapture):
@@ -1610,6 +1622,19 @@ class OspConnectivityPlugin:
         panel = chooser.selected()
         if panel is None:
             return
+        # Reopen the view after terminations change, so it shows the saved ports.
+        while self._show_panel(project, idf, panel):
+            layers, infos = scan(project)
+            features = read_features(project, layers, infos)
+            panel = next((item for item in features if item.get("layer_id") == panel.get("layer_id")
+                          and item.get("fid") == panel.get("fid")), None)
+            if panel is None:
+                return
+
+    def _show_panel(self, project, idf, panel) -> bool:
+        """Show one panel. True when its terminations were changed."""
+        layers, infos = scan(project)
+        features = read_features(project, layers, infos)
         tolerance = self._tolerance(project)
         tables = read_tables(layers, infos)
         inventory = panel_ports(panel, features, tables)
@@ -1637,7 +1662,94 @@ class OspConnectivityPlugin:
                 lines.append(format_report(traced))
             port["detail"] = "\n".join(lines)
         inventory["title"] = choice_label(feature_id(panel), (panel.get("values") or {}).get("name"), feature_id(idf))
-        PanelViewDialog(inventory, self.iface.mainWindow()).exec_()
+        changed = []
+
+        def modify():
+            try:
+                changed.append(self._modify_terminations(project, panel, inventory["title"]))
+            except Cancelled:
+                return False
+            except Exception as exc:
+                QgsMessageLog.logMessage(traceback.format_exc(), "OSP Connectivity", Qgis.Critical)
+                QMessageBox.critical(self.iface.mainWindow(), "Modify terminations", str(exc))
+                return False
+            return bool(changed[-1])
+
+        result = PanelViewDialog(inventory, self.iface.mainWindow(), modify=modify).exec_()
+        return result == PanelViewDialog.MODIFIED
+
+    def _modify_terminations(self, project, panel, label) -> bool:
+        """Edit the panel's terminations. True when something was saved."""
+        layers, infos = scan(project)
+        features = read_features(project, layers, infos)
+        tables = read_tables(layers, infos)
+        if panel_media(panel, features) == "fiber":
+            return self._modify_fiber_terminations(project, panel, label, layers, infos, features, tables)
+        rows = copper_rows(panel, features)
+        dialog = CopperTerminationDialog(
+            label, rows,
+            lambda ports, move: copper_changes(panel, rows, ports, features, tables, move),
+            self.iface.mainWindow(),
+        )
+        if dialog.exec_() != dialog.Accepted or not dialog.result_value:
+            raise Cancelled()
+        result = dialog.result_value
+        session = EditSession()
+        try:
+            skipped = apply_plain_edits(session, layers, infos, result["cable_edits"] + result["device_edits"])
+            update_feature_fields(session, layers, result["row_updates"])
+            errors = session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        if errors:
+            raise RuntimeError("\n".join(errors))
+        lines = [f"{label} terminations updated."]
+        lines.extend(f"{cable}: port {old or 'none'} → {new}" for cable, old, new in result["changed"])
+        lines.extend(f"Skipped field: {note}" for note in skipped)
+        lines.append("Save layer edits to keep this. Undo reverses it until then.")
+        self._show("\n".join(lines))
+        self.iface.mapCanvas().refresh()
+        return True
+
+    def _modify_fiber_terminations(self, project, panel, label, layers, infos, features, tables) -> bool:
+        existing = fiber_terminations(panel, tables)
+        dialog = FiberTerminationDialog(
+            label, existing, fiber_candidates(panel, features), panel_capacity(panel),
+            lambda additions, removed: fiber_additions(panel, additions, features, tables, removed),
+            lambda cable_id, removed: blocked_ports(panel, cable_id, features, tables, removed),
+            self.iface.mainWindow(),
+        )
+        if dialog.exec_() != dialog.Accepted or not dialog.result_value:
+            raise Cancelled()
+        chosen = dialog.result_value
+        # Validate again against the project as it is now, then create the table only if rows are added.
+        layers, infos = scan(project)
+        features = read_features(project, layers, infos)
+        tables = read_tables(layers, infos)
+        result = fiber_additions(panel, chosen["additions"], features, tables, chosen["removed"])
+        store = {}
+        if result["rows"]:
+            store["fiber_termination"] = ensure_fiber_terminations(project, layers, infos)
+            layers, infos = scan(project)
+        session = EditSession()
+        try:
+            delete_features(session, layers, [(row["_layer_id"], row["_fid"]) for row in chosen["removed"]
+                                              if row.get("_fid") is not None])
+            apply_inserts(session, store, [RowInsert("fiber_termination", row, "fiber") for row in result["rows"]])
+            skipped = apply_plain_edits(session, layers, infos, result["cable_edits"])
+            errors = session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        if errors:
+            raise RuntimeError("\n".join(errors))
+        lines = [f"{label} terminations updated: {len(result['rows'])} strand(s) added, "
+                 f"{len(chosen['removed'])} removed."]
+        lines.extend(f"Skipped field: {note}" for note in skipped)
+        lines.append("Save layer edits to keep this. Undo reverses it until then.")
+        self._show("\n".join(lines))
+        return True
 
     def _view_switch(self, canvas_point):
         project, point_xy, layers, infos, features = self._click_context(canvas_point)
