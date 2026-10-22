@@ -90,7 +90,8 @@ class NotationTests(unittest.TestCase):
         original = deepcopy(tables)
         report = trace_selection([ap], [ap, cable, other], tables)['reports'][0]
         self.assertEqual(tables, original)
-        self.assertEqual(report['strand_lines'], ['A:1 ↔︎ B:1 (fusion @ EN-1)'])
+        self.assertEqual(report['strand_lines'][1], 'A:1 ↔︎ B:1 (fusion @ EN-1)')
+        self.assertTrue(report['strand_lines'][0].startswith('From: ') and report['strand_lines'][-1].startswith('To: '))
         self.assertIn('A:2 ↔︎ OPEN (open @ EN-2)', report['splice_lines'])
         self.assertEqual(set(report['enclosures']), {'EN-1', 'EN-2'})
         self.assertEqual(report['handholes'], ['HH-1'])

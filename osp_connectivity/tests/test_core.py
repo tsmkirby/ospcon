@@ -361,7 +361,7 @@ class AssociateAndTraceTests(unittest.TestCase):
             {"splices": splices, "memberships": memberships, "routes": [], "circuits": []},
         )
         text = format_report(result)
-        self.assertIn("Segments: CB-0002 > CB-0001", text)
+        self.assertIn("Segments: CB-0001 > CB-0002", text)  # route order
         self.assertIn("Enclosures: EN-0001", text)
         highlighted = {item[1] for item in result["highlights"]["cables"]}
         self.assertEqual(highlighted, {1, 2})

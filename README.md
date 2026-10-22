@@ -88,7 +88,7 @@ Select a fiber enclosure, then click **Splice Editor** (or **Modify associations
 - **Express spare fibers** connects matching unused numbers between two chosen cables. Existing connections are preserved.
 - Record a tray, measured loss in dB, status, and notes. Existing native attributes such as splice dates and technician names survive edits.
 - Filter rows by cable, fibers, type, tray, or notes; copy the list; undo and redo within the dialog. Filtering only hides rows.
-- Select one splice and click **Show saved route** to trace that splice's fibers through the saved project. The route is highlighted on the map and summarized inside the editor. **Print saved route PDF** prints a circuit card for it. Both exclude pending changes in the editor; they read the current QGIS project, including existing layer edit buffers.
+- Select one splice and click **Show saved route** to trace that splice's fibers through the saved project, from panel and port to panel and port. Only that route is listed and highlighted on the map, not every cable sharing its enclosures. **Print saved route PDF** prints a circuit card for it. Both exclude pending changes in the editor; they read the current QGIS project, including existing layer edit buffers.
 - Validation checks fiber counts on both cables, overlapping assignments in either direction, mismatched ranges, ambiguous cable IDs, and invalid measurements. Fix the errors before saving.
 
 **Save** applies the list, adds newly detected enclosure memberships, and labels blank cable endpoints. Only changed splice rows are replaced; other enclosures and unchanged splice records keep their IDs and attributes. **Cancel** leaves the stored splices unchanged. Changes stay in the QGIS edit buffers until you save layer edits. Each affected layer has its own undo step.
@@ -108,12 +108,23 @@ Select an AP, camera, jack, cable, IDF, panel, or splice enclosure, then run **T
 - Handholes the cable passes through, joined by `>`, using each handhole's access id or access name
 - IDF
 - Panel and port
-- Associated fiber segments, in connection order
+- Fiber segments the traced strands pass through, in route order
 - Splice enclosures on that path
-- Fiber strands, compressed into ranges, including splice hops
+- The fiber route: where the strands start (IDF, panel, and port), each splice in order, and where they end. Strands that take different paths are listed as separate routes.
 - All recorded splices on associated cables, including open fibers, with each enclosure retained
 
 Fiber connections use `cable:strand ↔︎ cable:strand` or `cable:first-last ↔︎ cable:first-last`, followed by splice type and enclosure. Open fibers use `cable:strand ↔︎ OPEN`. Ranges from separate enclosures or cable layers are never combined. A circuit with no recorded strand assignment is flagged instead of treating every available fiber as that circuit.
+
+A fiber route follows each strand splice by splice, both ways from the traced cable, until it reaches a cable end with no further splice. It reads from one end to the other, never back on itself, whichever cable on the route was traced:
+
+```
+From: IDF-1 PP1:1-2 (F-1:1-2)
+F-1:1-2 ↔︎ F-2:1-2 (express @ EN-1)
+F-2:1-2 ↔︎ F-3:1-2 (express @ EN-2)
+To: IDF-2 PP2:1-2 (F-3:1-2)
+```
+
+The port at each end comes from the fiber termination table when it has a row for that strand, otherwise from the cable's end panel and port, where strand *n* lands on the *n*th port of the range. An end can also read `left OPEN @ EN-1`, `not spliced @ EN-1`, or `cable end not recorded`. A splice saved twice, or once in each direction, counts once. If the saved splices form a loop, the route stops where the loop starts and a warning says so.
 
 Copper links use `IDF101 SWITCH01 Gi1/0/12 -- PP-01:12 -- [CB-01 Cat6] -- DJ-01 -- AP-01`. The data jack is omitted when absent. Missing switch/termination information is identified explicitly in the report. Switch patches are included for both copper and fiber circuits.
 

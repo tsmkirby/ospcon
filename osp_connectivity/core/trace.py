@@ -6,6 +6,7 @@ from uuid import uuid5, NAMESPACE_URL
 from .catalog import DEVICE_ROLES, build_index, feature_id, resolve_end
 from .fields import media_of, parse_count, text_of, ranges_overlap, parse_range
 from .handholes import handhole_label, handholes_on_cables
+from .fiberpath import fiber_routes, route_lines
 from .strands import compress_splices, strand_numbers_for
 from .notation import fiber_ranges, horizontal_link, panel_end
 from .naming import local_asset_id
@@ -64,7 +65,8 @@ def trace_fibers(cable_id, layer_id, first, last, features: list[dict], tables: 
     except (TypeError, ValueError):
         return {"reports": [], "highlights": _empty_highlights(),
                 "warnings": [f"Fiber range {first}-{last} on {cable_id} is not valid."]}
-    circuit = {"cable_id": feature_id(cable), "strand_from": first, "strand_to": last, "media_type": "fiber"}
+    circuit = {"cable_id": feature_id(cable), "strand_from": first, "strand_to": last, "media_type": "fiber",
+               "_route_only": True}
     report = _report_from_cable(None, cable, circuit, features, tables, build_index(features), tolerance)
     return {"reports": [report], "highlights": report.get("highlights") or _empty_highlights(), "warnings": []}
 
@@ -280,6 +282,7 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
     enclosure_refs = []
     rows = []
     numbers = []
+    routes = []
     if media == "fiber":
         if circuit and circuit.get("strand_from"):
             start = int(circuit["strand_from"])
@@ -296,10 +299,16 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
                 numbers = strand_numbers_for(values)
         if numbers and parse_count(values.get("strand_count")) and max(numbers) > parse_count(values.get("strand_count")):
             warnings.append(f"Strand list exceeds the strand count on {identifier}.")
-        rows = _walk_strands(identifier, numbers, tables.get("splices") or [])
-        strand_lines = compress_splices(rows) if rows else []
-        if numbers and not strand_lines:
-            strand_lines = fiber_ranges(identifier, numbers)
+        if numbers:
+            # Known fibers are followed hop by hop to both terminations, in route order.
+            found = fiber_routes(identifier, cable.get("layer_id") or "", numbers, features, tables)
+            routes = found["routes"]
+            warnings.extend(found["warnings"])
+            rows = [hop for route in routes for hop in route["rows"]]
+            strand_lines = route_lines(routes)
+        else:
+            rows = _walk_strands(identifier, numbers, tables.get("splices") or [])
+            strand_lines = compress_splices(rows) if rows else []
         seen_enc = set()
         for row in rows:
             enc_id = text_of(row.get("splice_enc_id"))
@@ -317,10 +326,16 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
         length = f"{values.get('length_m')} m"
 
     cable_ids, enclosure_ids = linked_fiber(identifier, features, tables, index)
+    path_ids = list(dict.fromkeys(name for route in routes for name in route["cables"]))
+    route_only = bool(routes) and bool((circuit or {}).get("_route_only"))
+    if route_only:
+        # Only the plant these fibers pass through, not every cable sharing an enclosure with them.
+        cable_ids = path_ids
+        enclosure_ids = list(dict.fromkeys(name for route in routes for name in route["enclosures"]))
     associated_ids = {item.casefold() for item in cable_ids}
     route_splices = [row for row in tables.get('splices') or []
                     if any((text_of(row.get(f'{side}_cable_id')) or '').casefold() in associated_ids
-                           for side in ('a', 'b'))] if media == 'fiber' else []
+                           for side in ('a', 'b'))] if media == 'fiber' and not route_only else []
     splice_lines = compress_splices(route_splices)
     path_cables = [item for item in features if item.get('role') == 'cable'
                    and (feature_id(item) or '').casefold() in associated_ids] or [cable]
@@ -335,11 +350,19 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
                     if text_of(segment_values.get(f'{side}_panel')):
                         route_panels.add((text_of(segment_values.get(f'{side}_panel')),
                                           text_of(segment_values.get(f'{side}_port'))))
+    if routes and len(routes) == 1 and not text_of((circuit or {}).get("panel_id")):
+        # The route's own start: where the traced fibers leave the plant on the first cable's side.
+        first = routes[0]
+        start_room = _find_id(features, first["start_place"], {"idf"})
+        if start_room:
+            idf_hit = start_room
+        if first["start_panel"]:
+            panel, port = first["start_panel"], first["start_ports"] or None
     if not idf_hit and len(route_idfs) == 1:
         idf_hit = next(iter(route_idfs.values()))
     if not panel and len(route_panels) == 1:
         panel, port = next(iter(route_panels))
-    if len(route_idfs) > 1:
+    if len(route_idfs) > 1 and not routes:
         warnings.append('Associated route has multiple IDFs: ' + ', '.join(feature_id(item) for item in route_idfs.values()))
     idf_id = feature_id(idf_hit) if idf_hit else (text_of(circuit.get('idf_id')) if circuit else None)
     panel_feature = _find_id(features, panel, {'patch_panel', 'fdp'})
@@ -444,6 +467,8 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
     # Circuit-only route data deliberately excludes other cables sharing an enclosure.
     circuit_ids = list(dict.fromkeys([identifier, *[row.get(f'{side}_cable_id')
                         for row in rows for side in ('a', 'b') if row.get(f'{side}_cable_id')]]))
+    if routes:
+        circuit_ids = list(path_ids)
     circuit_set = {name.casefold() for name in circuit_ids}
     circuit_cables = [item for item in path_cables if (feature_id(item) or '').casefold() in circuit_set]
     circuit_encs = list(dict.fromkeys(row['splice_enc_id'] for row in rows if row.get('splice_enc_id')))
@@ -471,6 +496,10 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
                                              'splice_type', 'a_layer_id', 'b_layer_id'))
         hop_groups.setdefault(key, []).append(row)
     ordered_splices = [line for group in hop_groups.values() for line in compress_splices(group)]
+    # With known fibers the segments are the route itself, in order; otherwise every associated segment.
+    segments = path_ids if routes else cable_ids
+    segments = segments if len(segments) > 1 else []
+
     def tracking_value(*keys):
         return next((text_of(source.get(key)) for source in (circuit or {}, values) for key in keys
                      if text_of(source.get(key))), '')
@@ -505,9 +534,9 @@ def _report_from_cable(device, cable, circuit, features, tables, index, toleranc
         "panel_id": local_asset_id(panel, idf_id),
         "panel_key": panel,
         "panel_port": port,
-        "strand_lines": ordered_splices or strand_lines,
+        "strand_lines": strand_lines if routes else (ordered_splices or strand_lines),
         "splice_lines": splice_lines,
-        "segments": cable_ids if len(cable_ids) > 1 else [],
+        "segments": segments,
         "enclosures": enclosure_ids,
         "handholes": handhole_ids,
         "warnings": warnings,
