@@ -66,17 +66,38 @@ def _resolve(cables, identifier, layer=""):
     return exact[0] if len(exact) == 1 else found[0] if len(found) == 1 else None
 
 
+def _strand(value):
+    """A stored strand number, or None when it is blank or not a whole number."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(str(value).strip())
+    except ValueError:
+        return None
+    return int(number) if number.is_integer() else None
+
+
+def _loss(value):
+    """Loss as a number; numeric text from a string field is accepted, anything else is None."""
+    if value is None or isinstance(value, bool) or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def group_rows(rows):
     """Compress contiguous, equivalent rows while retaining every original attribute."""
     ordered = sorted(rows, key=lambda row: (
         str(row.get("a_layer_id") or ""), str(row.get("a_cable_id") or ""),
         str(row.get("b_layer_id") or ""), str(row.get("b_cable_id") or ""),
-        str(row.get("splice_type") or ""), int(row.get("a_strand_no") or 0),
+        str(row.get("splice_type") or ""), _strand(row.get("a_strand_no")) or 0,
     ))
     groups = []
     for row in ordered:
-        a = int(row.get("a_strand_no") or 0)
-        b = int(row["b_strand_no"]) if row.get("b_strand_no") is not None else None
+        a = _strand(row.get("a_strand_no")) or 0
+        b = _strand(row.get("b_strand_no"))
         previous = groups[-1] if groups else None
         if (previous and _metadata(previous["_originals"][-1]) == _metadata(row)
                 and a == previous["a_to"] + 1
@@ -158,13 +179,13 @@ def validate_groups(groups, cables):
         if not kind:
             errors.append(prefix + "choose a splice type.")
         loss = group.get("loss_db")
-        if loss is not None and (not isinstance(loss, (int, float)) or not 0 <= loss < float("inf")):
+        if loss not in (None, "") and (_loss(loss) is None or not 0 <= _loss(loss) < float("inf")):
             errors.append(prefix + "loss must be a finite, nonnegative number.")
         a, b = _resolve(cables, group.get("a_cable_id"), group.get("a_layer_id")), _resolve(cables, group.get("b_cable_id"), group.get("b_layer_id"))
         sides = [("A", a, group.get("a_from"), group.get("a_to"))]
         if kind != "OPEN":
             sides.append(("B", b, group.get("b_from"), group.get("b_to")))
-            if (group.get("a_to", 0) - group.get("a_from", 0)
+            if ((group.get("a_to") or 0) - (group.get("a_from") or 0)
                     != (group.get("b_to") or 0) - (group.get("b_from") or 0)):
                 errors.append(prefix + "both fiber ranges must have equal lengths.")
             if a and b and cable_key(a) == cable_key(b):
@@ -230,3 +251,13 @@ def fiber_usage(cables, groups):
             if cable and isinstance(first, int) and isinstance(last, int):
                 used[cable_key(cable)].update(range(first, min(last, 100000) + 1))
     return used
+
+
+def available_fibers(cable, cables, groups):
+    """Fiber numbers on one cable that no connection in ``groups`` uses."""
+    capacity = int(cable.get("capacity") or 0)
+    return sorted(set(range(1, capacity + 1)) - fiber_usage(cables, groups).get(cable_key(cable), set()))
+
+
+def resolve_cable(cables, identifier, layer=""):
+    return _resolve(cables, identifier, layer)

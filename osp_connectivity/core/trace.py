@@ -52,6 +52,23 @@ def trace_selection(selected: list[dict], features: list[dict], tables: dict, to
     return {"reports": reports, "highlights": highlights, "warnings": warnings}
 
 
+def trace_fibers(cable_id, layer_id, first, last, features: list[dict], tables: dict, tolerance: float = 1.0) -> dict:
+    """Trace only the stored route of one cable's fiber range, such as one splice in an enclosure."""
+    cable = _find_id(features, cable_id, {"cable"}, layer_id or None)
+    if cable is None:
+        return {"reports": [], "highlights": _empty_highlights(),
+                "warnings": [f"Cable {cable_id or '(blank)'} is not in the project."]}
+    try:
+        first = int(first)
+        last = int(last if last is not None else first)
+    except (TypeError, ValueError):
+        return {"reports": [], "highlights": _empty_highlights(),
+                "warnings": [f"Fiber range {first}-{last} on {cable_id} is not valid."]}
+    circuit = {"cable_id": feature_id(cable), "strand_from": first, "strand_to": last, "media_type": "fiber"}
+    report = _report_from_cable(None, cable, circuit, features, tables, build_index(features), tolerance)
+    return {"reports": [report], "highlights": report.get("highlights") or _empty_highlights(), "warnings": []}
+
+
 def format_report(result: dict) -> str:
     blocks = []
     for warning in result.get("warnings") or []:

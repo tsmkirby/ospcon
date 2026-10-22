@@ -147,6 +147,31 @@ class SpliceEditorTests(unittest.TestCase):
             self.assertEqual(len(result), 3)
             self.assertEqual({row['splice_enc_id'] for row in result}, {'EN-1', 'EN-2', 'EN-3'})
 
+    def test_text_loss_and_strand_fields_do_not_break_the_editor(self):
+        enclosure, cables, rows = sample()
+        rows = rows[:2]
+        rows[0]['loss_db'] = '0.03'
+        rows[1]['a_strand_no'] = '2'
+        rows[1]['b_strand_no'] = 'x'
+        model = editor_model(enclosure, cables, {'splices': rows})
+        problems = validate_groups(model['groups'], model['cables'])
+        self.assertFalse(any('loss' in problem for problem in problems))
+        self.assertTrue(any('invalid fiber range on cable B' in problem for problem in problems))
+
+    def test_trace_fibers_follows_only_the_selected_range(self):
+        from osp_connectivity.core.trace import trace_fibers
+        enclosure, cables, rows = sample()
+        rows = rows[:2] + [dict(rows[0], a_cable_id='B', a_strand_no=1, b_cable_id='C', b_strand_no=5,
+                                splice_enc_id='EN-2', splice_type='FUSION')]
+        tables = {'splices': rows}
+        result = trace_fibers('A', 'cables', 1, 1, [enclosure, *cables], tables)
+        self.assertEqual(result['warnings'], [])
+        hops = result['reports'][0]['circuit_route']['segments']
+        self.assertEqual(hops, ['A', 'B', 'C'])
+        result = trace_fibers('A', 'cables', 2, 2, [enclosure, *cables], tables)
+        self.assertEqual(result['reports'][0]['circuit_route']['segments'], ['A', 'B'])
+        self.assertTrue(trace_fibers('missing', '', 1, 1, cables, tables)['warnings'])
+
 
 if __name__ == '__main__':
     unittest.main()

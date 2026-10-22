@@ -90,7 +90,7 @@ from .core.place import (
 )
 from .core.strands import build_splice_rows
 from .core.switches import choice_label, expand_switch_ports, panels_on_idf, switch_inventory, switches_for_idf
-from .core.trace import format_report, trace_selection
+from .core.trace import format_report, trace_fibers, trace_selection
 from .core.naming import local_asset_id, scoped_asset_id
 from .dialogs import (
     AssociateDialog,
@@ -1408,30 +1408,25 @@ class OspConnectivityPlugin:
     def _modify_enclosure(self, project, layers, infos, store, features, enclosure) -> None:
         tables = read_tables(layers, infos)
         model = editor_model(enclosure, features, tables, self._tolerance(project))
-        def saved_route():
+        def saved_route(group):
+            # Read the project fresh: only stored connections are traced, never pending editor rows.
             current_layers, current_infos = scan(project)
             current_features = read_features(project, current_layers, current_infos)
-            result = trace_selection([enclosure], current_features, read_tables(current_layers, current_infos),
-                                     self._tolerance(project))
+            result = trace_fibers(group.get("a_cable_id"), group.get("a_layer_id"), group.get("a_from"),
+                                  group.get("a_to"), current_features, read_tables(current_layers, current_infos),
+                                  self._tolerance(project))
             self._reports = list(result.get('reports') or [])
-            self._show(format_report(result))
             self._highlight(current_layers, result.get('highlights') or {})
-            return format_report(result)
+            text = format_report(result)
+            self._show(text)
+            return text
 
-        def print_saved_route():
-            saved_route()
+        def print_saved_route(group):
+            saved_route(group)
             self._circuit_card()
 
-        def show_saved_route():
-            try:
-                return saved_route()
-            except Exception as exc:
-                QMessageBox.warning(self.iface.mainWindow(), 'Show saved route', str(exc))
-                return str(exc)
-
         dialog = SpliceEditorDialog(model, self.iface.mainWindow(),
-                                   show_saved_route=show_saved_route,
-                                   print_saved_route=lambda: self._run('Print saved route PDF', print_saved_route))
+                                   show_saved_route=saved_route, print_saved_route=print_saved_route)
         if dialog.exec_() != dialog.Accepted:
             return
         edited_model = dialog.model

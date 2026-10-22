@@ -73,8 +73,8 @@ class QgisEditorTests(unittest.TestCase):
         for dialog in (panel, switch, patches):
             dialog.deleteLater()
 
-    def test_saved_route_buttons_do_not_apply_pending_splice_edits(self):
-        from unittest.mock import Mock
+    def test_saved_route_traces_the_selected_splice_without_pending_edits(self):
+        from unittest.mock import Mock, patch
         from qgis.PyQt.QtWidgets import QApplication
         from osp_connectivity.core.splice_editor import editor_model
         from osp_connectivity.splice_dialog import SpliceEditorDialog
@@ -85,20 +85,34 @@ class QgisEditorTests(unittest.TestCase):
         dialog = SpliceEditorDialog(model, show_saved_route=show, print_saved_route=print_pdf)
         dialog._copy()
         self.assertIn('A:1-144 ↔︎ B:1-144', QApplication.clipboard().text())
+        self.assertFalse(dialog.show_route.isEnabled())  # nothing selected yet
         dialog._delete()  # no selected rows; the saved model must remain untouched
-        dialog._add()
+        self.assertEqual(len(dialog.groups), 1)
+        new = dict(a_cable_id='C', a_layer_id='cables', a_from=1, a_to=2, b_cable_id='D', b_layer_id='cables',
+                   b_from=1, b_to=2, splice_type='FUSION', status='proposed', _originals=[])
+        with patch.object(dialog, '_wizard', return_value=new):
+            dialog._add()
+        self.assertEqual(dialog.table.item(1, 9).text(), 'New')
         pending = dialog._snapshot()
+        dialog.table.selectRow(0)
+        self.assertTrue(dialog.show_route.isEnabled())
         dialog.show_route.click()
         dialog.print_route.click()
-        show.assert_called_once_with()
-        print_pdf.assert_called_once_with()
+        self.assertEqual(show.call_args[0][0]['a_cable_id'], 'A')
+        self.assertEqual((show.call_args[0][0]['a_from'], show.call_args[0][0]['a_to']), (1, 144))
+        print_pdf.assert_called_once()
         self.assertEqual(dialog._snapshot(), pending)
         self.assertEqual(model['original'], rows)
         self.assertIn('pending editor changes excluded', dialog.saved_route.toPlainText())
+        show.side_effect = RuntimeError('layer gone')
+        with patch('osp_connectivity.splice_dialog.QMessageBox.warning') as warning:
+            dialog.show_route.click()
+        warning.assert_called_once()
         self.assertEqual(dialog.result(), 0)
         dialog.deleteLater()
 
-    def test_dialog_undo_restores_the_cable_choices_and_native_attributes(self):
+    def test_dialog_undo_restores_rows_and_native_attributes(self):
+        from unittest.mock import patch
         from osp_connectivity.core.splice_editor import editor_model, splice_changes
         from osp_connectivity.splice_dialog import SpliceEditorDialog
         from osp_connectivity.tests.test_splice_editor import sample
@@ -106,16 +120,95 @@ class QgisEditorTests(unittest.TestCase):
         model = editor_model(enclosure, cables, {'splices': rows})
         dialog = SpliceEditorDialog(model)
         self.assertEqual(dialog.table.rowCount(), 1)
+        self.assertEqual(dialog.table.item(0, 9).text(), 'Saved')
         self.assertEqual(splice_changes(dialog.model, dialog.choices())['splices'], [])
-        dialog._add()
+        new = dict(a_cable_id='C', a_layer_id='cables', a_from=1, a_to=1, b_cable_id='D', b_layer_id='cables',
+                   b_from=1, b_to=1, splice_type='FUSION', status='proposed', _originals=[])
+        with patch.object(dialog, '_wizard', return_value=new):
+            dialog._add()
         self.assertEqual(dialog.table.rowCount(), 2)
         dialog._undo()
         self.assertEqual(dialog.table.rowCount(), 1)
         self.assertEqual(splice_changes(dialog.model, dialog.choices())['splices'], [])
         dialog._redo()
         self.assertEqual(dialog.table.rowCount(), 2)
+        dialog.table.selectRow(0)
+        dialog._delete()
+        self.assertEqual(dialog.table.rowCount(), 1)
         dialog._undo()
+        self.assertEqual(dialog.table.rowCount(), 2)
         dialog.deleteLater()
+
+    def test_wizard_walks_cable_a_fibers_cable_b_fibers_then_details(self):
+        from osp_connectivity.core.splice_editor import editor_model, validate_groups
+        from osp_connectivity.splice_dialog import SpliceWizard
+        from osp_connectivity.tests.test_splice_editor import sample
+        enclosure, cables, rows = sample()
+        model = editor_model(enclosure, cables, {'splices': rows[:46]})  # A/B 1-46 expressed
+        wizard = SpliceWizard(model['cables'], model['groups'])
+        self.assertFalse(wizard.next.isEnabled())  # no cable A yet
+        wizard.a_list.setCurrentRow(0)  # A
+        wizard._next()
+        self.assertEqual(wizard.step, 1)
+        self.assertEqual((wizard.a_from.value(), wizard.a_to.value()), (47, 47))  # first free fiber
+        wizard.a_from.setValue(1)
+        self.assertFalse(wizard.next.isEnabled())  # fiber 1 is already expressed
+        wizard.a_from.setValue(47)
+        wizard.a_to.setValue(48)
+        wizard._next()
+        self.assertEqual(wizard.b_list.item(0).text().split(' ')[0], 'Leave')
+        labels = [wizard.b_list.item(row).text() for row in range(wizard.b_list.count())]
+        self.assertFalse(any(label.startswith('A —') for label in labels))  # cable A is not offered again
+        wizard.b_list.setCurrentRow(next(row for row, label in enumerate(labels) if label.startswith('C —')))
+        wizard._next()
+        self.assertEqual(wizard.step, 3)
+        self.assertEqual(wizard.b_from.value(), 1)  # C has only 12 fibers, so 47 cannot match
+        self.assertEqual(wizard.b_to.value(), 2)
+        wizard._next()
+        self.assertEqual(wizard.step, 4)
+        self.assertIn('A:47-48', wizard.summary.text())
+        wizard.loss.setText('abc')
+        self.assertFalse(wizard.next.isEnabled())
+        wizard.loss.setText('0.05')
+        wizard.kind.setCurrentText('EXPRESS')
+        self.assertFalse(wizard.next.isEnabled())  # express must keep fiber numbers
+        wizard.kind.setCurrentText('FUSION')
+        wizard._next()
+        self.assertEqual(wizard.result(), wizard.Accepted)
+        group = wizard.result_group()
+        self.assertEqual((group['a_cable_id'], group['a_from'], group['a_to']), ('A', 47, 48))
+        self.assertEqual((group['b_cable_id'], group['b_from'], group['b_to']), ('C', 1, 2))
+        self.assertEqual(group['loss_db'], 0.05)
+        self.assertEqual(validate_groups([*model['groups'], group], model['cables']), [])
+        wizard.deleteLater()
+
+    def test_wizard_can_leave_fibers_open_and_edit_keeps_native_rows(self):
+        from osp_connectivity.core.splice_editor import editor_model, splice_changes
+        from osp_connectivity.splice_dialog import SpliceWizard
+        from osp_connectivity.tests.test_splice_editor import sample
+        enclosure, cables, rows = sample()
+        model = editor_model(enclosure, cables, {'splices': rows})
+        wizard = SpliceWizard(model['cables'], [], model['groups'][0])
+        self.assertEqual(wizard.a_list.currentItem().text().split(' ')[0], 'A')
+        for _ in range(4):
+            wizard._next()
+        self.assertEqual(wizard.kind.currentText(), 'EXPRESS')
+        wizard._next()
+        self.assertEqual(splice_changes(model, [wizard.result_group()])['splices'], [])  # unchanged edit
+        wizard.deleteLater()
+        wizard = SpliceWizard(model['cables'], [])
+        wizard.a_list.setCurrentRow(2)  # C
+        wizard._next(); wizard._next()
+        wizard.b_list.setCurrentRow(0)  # leave open
+        wizard._next()
+        self.assertEqual(wizard.step, 4)
+        self.assertFalse(wizard.kind.isEnabled())
+        wizard._back()
+        self.assertEqual(wizard.step, 2)
+        wizard._next(); wizard._next()
+        group = wizard.result_group()
+        self.assertEqual((group['splice_type'], group['b_cable_id'], group['b_from']), ('OPEN', '', None))
+        wizard.deleteLater()
 
     def test_splice_replacement_and_added_fields_roll_back_together(self):
         from osp_connectivity.bridge import EditSession, apply_inserts, delete_features, ensure_splice_fields
@@ -204,7 +297,7 @@ class QgisEditorTests(unittest.TestCase):
         plugin._show = lambda text: None
         original = read_tables(layers, infos)
         dialog = SpliceEditorDialog(editor_model(enclosure, cables, original))
-        dialog.table.cellWidget(0, 5).setCurrentText('verified')
+        dialog.groups[0]['status'] = 'verified'
         with patch('osp_connectivity.plugin.SpliceEditorDialog', return_value=dialog), patch.object(dialog, 'exec_', return_value=QDialog.Accepted):
             plugin._modify_enclosure(project, layers, infos, {'fiber_splice': splice_layer,
                 'splice_enc_cable': member_layer, 'fiber_strand': strand_layer}, cables, enclosure)
