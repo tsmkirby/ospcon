@@ -63,12 +63,12 @@ from .bridge import (
 from .core.associate import assignment_edits, device_association, modification_edits, occupied_ports, propose
 from .core.cards import write_circuit_cards
 from .core.catalog import feature_id
-from .core.enclosures import enclosure_association, enclosure_edits, enclosure_end_links
+from .core.enclosures import enclosure_association, enclosure_edits, enclosure_end_links, enclosure_hits
 from .core.splice_editor import editor_model, splice_changes
 from .core.earth import empty_export_message, export_note, write_kmz
 from .core.export import export_reports
 from .core.fields import enclosure_id_from_prefix, mapped_values, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix, text_of
-from .core.geometry import distance, split_linestring
+from .core.geometry import distance
 from .core.link import RowInsert, plan_links
 from .core.panels import panel_feature_ids, panel_ports
 from .core.place import (
@@ -310,7 +310,10 @@ class OspConnectivityPlugin:
         canvas = self.iface.mapCanvas()
         self.tool = EnclosureMapTool(canvas, lambda point: self._run("Add fiber enclosure", lambda: self._enclose(point)))
         canvas.setMapTool(self.tool)
-        self.iface.messageBar().pushInfo("OSP Connectivity", "Click a fiber cable to add an enclosure.")
+        self.iface.messageBar().pushInfo(
+            "OSP Connectivity",
+            "Click a fiber cable to add an enclosure. If cables are selected, only those cables are used.",
+        )
 
     def start_panel(self):
         canvas = self.iface.mapCanvas()
@@ -649,21 +652,26 @@ class OspConnectivityPlugin:
         canvas = self.iface.mapCanvas()
         transform = QgsCoordinateTransform(canvas.mapSettings().destinationCrs(), project.crs(), project)
         point = transform.transform(canvas_point)
-        point_xy = (point.x(), point.y())
         layers, infos = scan(project)
         features = read_features(project, layers, infos)
         tolerance = self._tolerance(project)
-        hits = []
-        for feature in features:
-            if feature.get("role") != "cable" or media_of(feature.get("values") or {}) != "fiber":
-                continue
-            result = split_linestring(feature.get("coords") or [], point_xy, tolerance)
-            if result["kind"] in ("through", "endpoint"):
-                hits.append((feature, result))
-        through = [(feature, result) for feature, result in hits if result["kind"] == "through"]
-        laterals = [(feature, result) for feature, result in hits if result["kind"] == "endpoint"]
+        selected = {(feature["layer_id"], feature["fid"]) for feature in self._selected(layers, features)}
+        found = enclosure_hits(features, (point.x(), point.y()), tolerance, selected)
+        point_xy = found["point"]
+        through, laterals = found["through"], found["laterals"]
+        if found["limited"] and not found["selected_fiber"]:
+            raise RuntimeError("None of the selected cables is a fiber cable. Select a fiber cable, "
+                               "or clear the selection to use every fiber cable at the spot you click.")
         if not through:
+            if found["limited"]:
+                raise RuntimeError("Click on a selected fiber cable, away from its ends. Only the selected cables "
+                                   "are split while cables are selected; clear the selection to use every cable here.")
             raise RuntimeError("Click on a fiber cable, away from its ends, to add an enclosure.")
+        if found["limited"]:
+            self.iface.messageBar().pushInfo(
+                "OSP Connectivity",
+                f"Using only the selected cables: {len(through)} split, {len(laterals)} ending here.",
+            )
         if len(through) > 1:
             self.iface.messageBar().pushInfo(
                 "OSP Connectivity",

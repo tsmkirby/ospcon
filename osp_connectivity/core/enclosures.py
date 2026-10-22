@@ -4,9 +4,50 @@ from __future__ import annotations
 
 from .catalog import feature_id
 from .fields import media_of, parse_count, text_of
-from .geometry import distance
+from .geometry import distance, split_linestring
 from .place import nearer_end_name
 from .strands import build_splice_rows
+
+
+def enclosure_hits(features: list[dict], point, tolerance: float, selected=None) -> dict:
+    """Fiber cables a new enclosure at ``point`` attaches to.
+
+    ``selected`` holds the (layer_id, fid) of selected features. When any of
+    them is a cable, only those cables are used; otherwise every fiber cable
+    at the point is. The enclosure is snapped onto the nearest through cable,
+    so a click on a cable drawn apart from its stack, or anywhere within the
+    tolerance, still puts the enclosure on the stored line, and every cable is
+    split and labeled at that one spot.
+    """
+    selected = set(selected or ())
+    cables = [feature for feature in features if feature.get("role") == "cable"]
+    chosen = [feature for feature in cables if (feature.get("layer_id"), feature.get("fid")) in selected]
+    limited = bool(chosen)
+    candidates = [feature for feature in (chosen or cables) if media_of(feature.get("values") or {}) == "fiber"]
+
+    def classify(at):
+        hits = []
+        for feature in candidates:
+            result = split_linestring(feature.get("coords") or [], at, tolerance)
+            if result["kind"] in ("through", "endpoint"):
+                hits.append((feature, result))
+        hits.sort(key=lambda hit: hit[1]["distance"])
+        return hits
+
+    hits = classify(point)
+    through = [hit for hit in hits if hit[1]["kind"] == "through"]
+    snapped = tuple(through[0][1]["at"]) if through else tuple(point)
+    if through and distance(snapped, point) > 0:
+        hits = classify(snapped)
+        through = [hit for hit in hits if hit[1]["kind"] == "through"]
+    return {
+        "point": snapped,
+        "through": through,
+        "laterals": [hit for hit in hits if hit[1]["kind"] == "endpoint"],
+        "limited": limited,
+        "selected_cables": len(chosen),
+        "selected_fiber": sum(1 for feature in chosen if media_of(feature.get("values") or {}) == "fiber"),
+    }
 
 
 def enclosure_end_links(line, features: list[dict], tolerance: float, cable_id: str, layer_id: str) -> list[dict]:

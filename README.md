@@ -42,7 +42,7 @@ The **OSP Connectivity** toolbar uses compact square icons. Hover over an icon t
 | Modify associations | Select one device to change its panel, port, and handholes, or select an enclosure to open Splice Editor. |
 | Splice Editor | Select a fiber enclosure to edit all its cable pairs and fiber ranges. |
 | Trace selection | Follows the selected device, cable, or IDF and highlights the path. |
-| Add fiber enclosure | Click a fiber cable. The cable is split and you choose which strands are spliced. |
+| Add fiber enclosure | Click a fiber cable. The cable is split and you choose which strands are spliced. If cables are selected, only the selected cables are split or linked. |
 | Add patch panel | Click an IDF. A copper cable gets a copper panel and a fiber cable gets a fiber panel, with the port and ends recorded in the dialog. A new panel asks for its port count and is stored on that IDF. |
 | View patch panel | Click an IDF, then choose one of its patch panels. Every port is shown. Click a port to see the rear cable and any switch patch on it. |
 | View switch | Click an IDF, then choose one of its switches. Patched ports show the panel and port. |
@@ -79,18 +79,19 @@ Select one fiber enclosure instead, and the same tool opens **Splice Editor**.
 
 ### Splice Editor
 
-Select a fiber enclosure, then click **Splice Editor** (or **Modify associations**). The table loads **all** splice connections in the enclosure, including express fibers and connections between different cable pairs. Connections use `A:47-48 ↔︎ C:1-2`, with type and enclosure shown separately from the cable/strand notation.
+Select a fiber enclosure, then click **Splice Editor** (or **Modify associations**). The list shows **every** splice and expressed fiber in the enclosure, including connections between different cable pairs and open fibers. Connections use `A:47-48 ↔︎ C:1-2`, with type and enclosure shown separately from the cable/strand notation. The list is read-only; a State column marks each row Saved, Edited, or New, and rows with a problem are shown in red with the reason on hover.
 
-- Add a row, change either cable or fiber range, or select rows and delete them. Both fiber ranges must have the same length. A deleted connection leaves its fibers available.
-- Choose **FUSION**, **EXPRESS**, **MECHANICAL**, or **OPEN**. Express fibers retain the same numbers on both cables. OPEN records an explicitly open range; delete that row before assigning those fibers to another connection.
-- The cable inventory shows total fibers, reserved fibers, and available ranges. It includes cables stored in the enclosure relations and new fiber cables whose endpoints reach the enclosure within the snap tolerance. Enter a fiber count for a cable when it is unknown.
+- **Add splice** walks through five steps: cable A, the fibers on cable A, cable B (or leave the fibers open), the fibers on cable B, and the details. Each step shows the fibers still available and will not continue past fibers that are already spliced. Cable B uses the same number of fibers as cable A; matching numbers are suggested when they are free.
+- **Edit** (or double-click a row) opens the same steps for the selected splice. **Delete** removes the selected rows, leaving their fibers available.
+- Splice types are **FUSION**, **EXPRESS**, and **MECHANICAL**. Choosing "Leave open" for cable B records an **OPEN** range. Express fibers keep the same numbers on both cables.
+- The cable list shows total fibers, used and available fibers, and the free ranges. It includes cables stored in the enclosure relations and new fiber cables whose endpoints reach the enclosure within the snap tolerance. Enter a fiber count for a cable when it is unknown; a cable cannot be chosen for a splice until its count is set.
 - **Express spare fibers** connects matching unused numbers between two chosen cables. Existing connections are preserved.
-- Record a tray, measured loss in dB, status, and notes. Existing native attributes such as splice dates and technician names survive range edits.
-- Filter rows by cable, tray, type, or notes; copy the table; undo and redo edits within the dialog. Filtering only hides rows and does not remove their connections.
-- **Show saved route** highlights the enclosure's associated cables, devices, IDFs, enclosures, and handholes and opens a read-only route summary inside the editor. **Print saved route PDF** exports that stored route. Both actions exclude pending changes in the splice editor; they read the current QGIS project, including existing layer edit buffers.
+- Record a tray, measured loss in dB, status, and notes. Existing native attributes such as splice dates and technician names survive edits.
+- Filter rows by cable, fibers, type, tray, or notes; copy the list; undo and redo within the dialog. Filtering only hides rows.
+- Select one splice and click **Show saved route** to trace that splice's fibers through the saved project. The route is highlighted on the map and summarized inside the editor. **Print saved route PDF** prints a circuit card for it. Both exclude pending changes in the editor; they read the current QGIS project, including existing layer edit buffers.
 - Validation checks fiber counts on both cables, overlapping assignments in either direction, mismatched ranges, ambiguous cable IDs, and invalid measurements. Fix the errors before saving.
 
-**Save** applies the table, adds newly detected enclosure memberships, and labels blank cable endpoints. Only changed splice rows are replaced; other enclosures and unchanged splice records keep their IDs and attributes. **Cancel** leaves the splice table unchanged. Changes stay in the QGIS edit buffers until you save layer edits. Each affected layer has its own undo step.
+**Save** applies the list, adds newly detected enclosure memberships, and labels blank cable endpoints. Only changed splice rows are replaced; other enclosures and unchanged splice records keep their IDs and attributes. **Cancel** leaves the stored splices unchanged. Changes stay in the QGIS edit buffers until you save layer edits. Each affected layer has its own undo step.
 
 If the splice layer needs `a_layer_id`, `b_layer_id`, `tray`, `notes`, or `loss_db` fields, they are added in the same edit command, so those changes can also be undone. Stored relation tables are reopened when available, preserving their data even when they were removed from the layer tree.
 
@@ -169,6 +170,8 @@ Choose **Add fiber enclosure**, then click a point on a fiber cable, away from e
 - In the splice dialog, mark strands that stay open and strands that are fusion spliced. A lateral cable whose end lands on the same point can take the fusion. Example: `A:47-48 ↔︎ C:1-2` (fusion), with `A:1-46 ↔︎ B:1-46` and `A:49-144 ↔︎ B:49-144` expressed on the same numbers.
 - Clicking where two through cables cross splits both and tells you the enclosure has four cable ends.
 - A click on an endpoint does not split that cable. It is treated as a lateral that ends at the enclosure.
+- To work on only some of the cables at a spot, select them first. Only selected cables are split or linked as laterals; other cables at the point are left alone. With nothing selected, every fiber cable at the point is used. If the selected cables do not pass through the clicked point, or none of them is fiber, nothing changes and a message says why.
+- The enclosure is placed on the nearest cable that is split, not exactly where you clicked, so a click on a cable drawn apart by Cable Explode still puts the enclosure on the stored line.
 - Canceling the splice dialog rolls the split back.
 
 The two pieces of a split cable are linked to each other and to the enclosure. Tracing either segment lists the associated segments and the enclosure, and highlights them. The enclosure dialog asks for a prefix such as `VIB` or `OSP`, and the new id is the next `PREFIX-EN-` number. Lengths are recalculated only when the layer’s map units are meters.
