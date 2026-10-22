@@ -321,7 +321,7 @@ class QgisEditorTests(unittest.TestCase):
         from osp_connectivity.bridge import scan
         project = QgsProject()
         cables = QgsVectorLayer('LineString?crs=EPSG:3857&field=cable_id:string&field=media_type:string'
-                                '&field=strand_count:integer&field=a_end:string&field=z_end:string'
+                                '&field=strand_count:integer&field=a_end_id:string&field=z_end_id:string'
                                 '&field=a_end_panel_id:string&field=z_end_panel_id:string'
                                 '&field=a_end_port:string&field=z_end_port:string', 'cables', 'memory')
         panels = QgsVectorLayer('Point?crs=EPSG:3857&field=pp_id:string&field=mdf_idf_id:string&field=port_count:integer', 'pp', 'memory')
@@ -330,10 +330,10 @@ class QgisEditorTests(unittest.TestCase):
                              '&field=patch_panel_id:string&field=patch_panel_port:string', 'ap', 'memory')
         terms = QgsVectorLayer('None?field=cable_id:string&field=strand_no:integer&field=fdp_id:string'
                                '&field=panel_position:string&field=status:string', 'fiber_terminations', 'memory')
-        rows = [(cables, {'cable_id': 'CB-01', 'media_type': 'copper', 'a_end': 'AP-01', 'z_end': 'IDF-1',
+        rows = [(cables, {'cable_id': 'CB-01', 'media_type': 'copper', 'a_end_id': 'AP-01', 'z_end_id': 'IDF-1',
                           'z_end_panel_id': 'PP-01', 'z_end_port': '1'}, [(0, 0), (10, 0)]),
-                (cables, {'cable_id': 'F-1', 'media_type': 'fiber', 'strand_count': 12, 'a_end': 'IDF-1',
-                          'a_end_panel_id': 'FD-01', 'z_end': 'EN-1'}, [(0, 0), (0, 10)]),
+                (cables, {'cable_id': 'F-1', 'media_type': 'fiber', 'strand_count': 12, 'a_end_id': 'IDF-1',
+                          'a_end_panel_id': 'FD-01', 'z_end_id': 'EN-1'}, [(0, 0), (0, 10)]),
                 (panels, {'pp_id': 'PP-01', 'mdf_idf_id': 'IDF-1', 'port_count': 24}, [(0, 0)]),
                 (fdps, {'fdp_id': 'FD-01', 'mdf_idf_id': 'IDF-1', 'position_count': 24}, [(0, 0)]),
                 (aps, {'ap_id': 'AP-01', 'cable_id': 'CB-01', 'patch_panel_id': 'PP-01', 'patch_panel_port': '1'}, [(10, 0)])]
@@ -429,6 +429,43 @@ class QgisEditorTests(unittest.TestCase):
             self.assertTrue(self._plugin()._modify_terminations(project, fdp, 'FD-01'))
         self.assertEqual(terms.featureCount(), 0)
         terms.rollBack()
+
+    def test_strand_list_routes_the_whole_selected_circuit(self):
+        from unittest.mock import Mock, patch
+        from osp_connectivity.core.strandlist import strand_list
+        from osp_connectivity.termination_dialog import StrandListDialog
+        from osp_connectivity.tests.test_strandlist import StrandListTests
+        case = StrandListTests()
+        case.setUp()
+        listing = strand_list(case.cables[0], case.features, {'splices': case.splices})
+        show, print_pdf = Mock(return_value='From: IDF-1 FD-01:1-2'), Mock()
+        dialog = StrandListDialog(listing, show_saved_route=show, print_saved_route=print_pdf)
+        self.assertEqual(dialog.table.rowCount(), 6)
+        self.assertEqual(dialog.table.item(0, 1).text(), 'AP-0004 ↔︎ IDF-1 FD-01:1-2-1')
+        dialog.table.setCurrentCell(1, 1)
+        dialog.show_route.click()
+        show.assert_called_once_with([1, 2])  # both fibers of the circuit
+        self.assertIn('Saved route for AP-0004 ↔︎ IDF-1 FD-01:1-2', dialog.detail.toPlainText())
+        dialog.print_route.click()
+        print_pdf.assert_called_once_with([1, 2])
+        dialog.table.setCurrentCell(5, 1)  # the open strand has no circuit: trace that strand alone
+        dialog.show_route.click()
+        self.assertEqual(show.call_args[0][0], [6])
+        show.side_effect = RuntimeError('layer gone')
+        with patch('qgis.PyQt.QtWidgets.QMessageBox.warning') as warning:
+            dialog.show_route.click()
+        warning.assert_called_once()
+        self.assertIn('AP-0004', dialog.text())
+        dialog.deleteLater()
+
+    def test_saved_fiber_route_traces_a_project_cable(self):
+        project, _cables, _aps, _terms = self._termination_project()
+        plugin = self._plugin()
+        plugin._highlight = lambda layers, highlights: setattr(self, 'highlighted', highlights)
+        text = plugin._saved_fiber_route(project, 'F-1', '', [1, 2, 5])
+        self.assertIn('From: IDF-1 FD-01', text)
+        self.assertEqual(len(plugin._reports), 2)  # strands 1-2 and 5 are separate runs
+        self.assertTrue(self.highlighted['cables'])
 
     def test_toolbar_buttons_have_square_icons_and_accessible_names(self):
         from osp_connectivity.plugin import OspConnectivityPlugin

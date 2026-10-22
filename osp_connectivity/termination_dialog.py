@@ -359,3 +359,114 @@ class FiberTerminationDialog(QDialog):
         if result is not None and (self.pending or self.removed_groups):
             self.result_value = {"additions": self.additions(), "removed": self.removed(), "result": result}
             self.accept()
+
+
+class StrandListDialog(QDialog):
+    """Every strand of one fiber cable and the circuit on it, as ``A end ↔︎ Z end-1``."""
+
+    def __init__(self, listing, parent=None, show_saved_route=None, print_saved_route=None):
+        super().__init__(parent)
+        from qgis.PyQt.QtWidgets import QApplication, QPlainTextEdit
+
+        self.listing = listing
+        self._show_saved_route = show_saved_route
+        self._print_saved_route = print_saved_route
+        self.setWindowTitle(f"Strands — {listing['cable_id']}")
+        self.resize(900, 600)
+        layout = QVBoxLayout(self)
+        rows = listing["rows"]
+        circuits = len({row["circuit"].rsplit("-", 1)[0] for row in rows if row["circuit"]})
+        summary = QLabel(f"{listing['cable_id']}: {listing['count']} strands, {circuits} circuit(s). "
+                         "A is the first termination on each strand's route (a device when there is one) "
+                         "and Z the last; -1 and -2 are the fibers of a circuit.")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        if not rows:
+            layout.addWidget(QLabel("This cable has no strand count and no saved strands. Set its strand count first."))
+        self.table = _table(["Strand", "Circuit", "Route"])
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setRowCount(len(rows))
+        for index, row in enumerate(rows):
+            self.table.setItem(index, 0, _readonly(row["number"]))
+            circuit = _readonly(row["circuit"] or "no circuit")
+            if not row["circuit"]:
+                circuit.setForeground(Qt.gray)
+            self.table.setItem(index, 1, circuit)
+            self.table.setItem(index, 2, _readonly(row["route"]))
+        self.table.currentCellChanged.connect(lambda *_args: self._detail())
+        layout.addWidget(self.table, 1)
+        route = QHBoxLayout()
+        self.show_route = QPushButton("Show saved route")
+        self.show_route.setToolTip("Trace the selected strand's circuit through the saved project and highlight it.")
+        self.show_route.clicked.connect(lambda *_args: self._route(self._show_saved_route, "Show saved route", True))
+        self.print_route = QPushButton("Print saved route PDF")
+        self.print_route.clicked.connect(lambda *_args: self._route(self._print_saved_route, "Print saved route PDF", False))
+        for button, callback in ((self.show_route, show_saved_route), (self.print_route, print_saved_route)):
+            button.setAutoDefault(False)
+            button.setEnabled(callback is not None and bool(rows))
+            route.addWidget(button)
+        route.addStretch()
+        layout.addLayout(route)
+        self.detail = QPlainTextEdit()
+        self.detail.setReadOnly(True)
+        self.detail.setMinimumHeight(150)
+        layout.addWidget(self.detail, 1)
+        for warning in listing.get("warnings") or []:
+            note = QLabel(f"Warning: {warning}")
+            note.setWordWrap(True)
+            note.setStyleSheet(f"color: {ERROR};")
+            layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        copy = buttons.addButton("Copy list", QDialogButtonBox.ActionRole)
+        copy.clicked.connect(lambda *_args: QApplication.clipboard().setText(self.text()))
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        if rows:
+            self.table.setCurrentCell(0, 1)
+
+    def circuit_numbers(self, index=None):
+        """The selected strand and every other strand of this cable in the same circuit."""
+        index = self.table.currentRow() if index is None else index
+        rows = self.listing["rows"]
+        if not 0 <= index < len(rows):
+            return []
+        row = rows[index]
+        if not row["circuit"]:
+            return [row["number"]]
+        circuit = (row["a_end"], row["z_end"])
+        return [other["number"] for other in rows if other["circuit"] and (other["a_end"], other["z_end"]) == circuit]
+
+    def _route(self, callback, title, display):
+        from qgis.PyQt.QtWidgets import QMessageBox
+
+        numbers = self.circuit_numbers()
+        if callback is None or not numbers:
+            return
+        try:
+            text = callback(numbers)
+        except Exception as exc:  # A failed trace must not close the list.
+            QMessageBox.warning(self, title, str(exc) or exc.__class__.__name__)
+            return
+        if display and text is not None:
+            row = self.listing["rows"][self.table.currentRow()]
+            heading = row["circuit"].rsplit("-", 1)[0] if row["circuit"] else f"strand {row['number']}"
+            self.detail.setPlainText(f"Saved route for {heading} ({self.listing['cable_id']} strands "
+                                     f"{_format_ports(numbers)})\n\n{text}")
+
+    def text(self):
+        lines = ["Strand\tCircuit\tRoute"]
+        lines.extend(f"{row['number']}\t{row['circuit']}\t{row['route']}" for row in self.listing["rows"])
+        return "\n".join(lines)
+
+    def _detail(self):
+        index = self.table.currentRow()
+        if not 0 <= index < len(self.listing["rows"]):
+            return
+        row = self.listing["rows"][index]
+        lines = [f"Strand {row['number']} of {self.listing['cable_id']}"]
+        if row["circuit"]:
+            size = "1-fiber" if row["size"] == 1 else f"{row['size']}-fiber"
+            lines.append(f"Circuit: {row['circuit']}  ({size}, from {row['source']})")
+        lines.append(f"Route: {row['route']}")
+        lines.extend(row["splices"] or ["No splices on this strand."])
+        self.detail.setPlainText("\n".join(lines))

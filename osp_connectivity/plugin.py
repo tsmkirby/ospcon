@@ -121,7 +121,8 @@ from .dialogs import (
 )
 from .mapimage import render_circuit_jpegs
 from .splice_dialog import SpliceEditorDialog
-from .termination_dialog import CopperTerminationDialog, FiberTerminationDialog
+from .termination_dialog import CopperTerminationDialog, FiberTerminationDialog, StrandListDialog
+from .core.strandlist import strand_list
 
 
 class SketchTool(QgsMapToolCapture):
@@ -250,6 +251,7 @@ class OspConnectivityPlugin:
         self._action("Associate selection", self.associate_selection)
         self._action("Modify associations", self.modify_associations)
         self._action("Splice Editor", self.open_splice_editor)
+        self._action("Show Strands List", self.start_strands)
         self._action("Trace selection", self.trace_selection)
         self._action("Add fiber enclosure", self.start_enclosure)
         self._action("Add patch panel", self.start_panel)
@@ -317,6 +319,64 @@ class OspConnectivityPlugin:
 
     def trace_selection(self):
         self._run("Trace selection", self._trace)
+
+    def _saved_fiber_route(self, project, cable_id, layer_id, numbers) -> str:
+        """Trace these fibers of one cable through the saved project, highlight them, and return the report.
+
+        The project is read fresh, so only stored connections are traced, never pending editor rows.
+        Fibers that are not consecutive are traced as separate runs.
+        """
+        current_layers, current_infos = scan(project)
+        current_features = read_features(project, current_layers, current_infos)
+        tables = read_tables(current_layers, current_infos)
+        runs = []
+        for number in sorted(set(numbers)):
+            if runs and number == runs[-1][1] + 1:
+                runs[-1][1] = number
+            else:
+                runs.append([number, number])
+        combined = {"reports": [], "highlights": {}, "warnings": []}
+        for first, last in runs or [[None, None]]:
+            result = trace_fibers(cable_id, layer_id, first, last, current_features, tables, self._tolerance(project))
+            combined["reports"].extend(result.get("reports") or [])
+            combined["warnings"].extend(result.get("warnings") or [])
+            for key, refs in (result.get("highlights") or {}).items():
+                merged = combined["highlights"].setdefault(key, [])
+                merged.extend(ref for ref in refs if ref not in merged)
+        self._reports = list(combined["reports"])
+        self._highlight(current_layers, combined["highlights"])
+        text = format_report(combined)
+        self._show(text)
+        return text
+
+    def start_strands(self):
+        canvas = self.iface.mapCanvas()
+        self.tool = EnclosureMapTool(canvas, lambda point: self._run("Show Strands List", lambda: self._show_strands(point)))
+        canvas.setMapTool(self.tool)
+        self.iface.messageBar().pushInfo("OSP Connectivity", "Click a fiber cable segment to list its strands.")
+
+    def _show_strands(self, canvas_point):
+        project, point_xy, layers, infos, features = self._click_context(canvas_point)
+        fiber = [feature for feature in features if feature.get("role") == "cable"
+                 and media_of(feature.get("values") or {}) == "fiber"]
+        cable = nearest_cable(point_xy, fiber, self._tolerance(project))
+        if cable is None:
+            near = nearest_cable(point_xy, [item for item in features if item.get("role") == "cable"], self._tolerance(project))
+            if near is not None:
+                raise RuntimeError(f"{feature_id(near)} is not a fiber cable. Click a fiber cable segment.")
+            raise RuntimeError("Click a fiber cable segment to list its strands.")
+        listing = strand_list(cable, features, read_tables(layers, infos))
+        identifier, layer_id = feature_id(cable), cable.get("layer_id")
+
+        def show(numbers):
+            return self._saved_fiber_route(project, identifier, layer_id, numbers)
+
+        def print_route(numbers):
+            show(numbers)
+            self._circuit_card()
+
+        StrandListDialog(listing, self.iface.mainWindow(), show_saved_route=show,
+                         print_saved_route=lambda numbers: self._run("Print saved route PDF", lambda: print_route(numbers))).exec_()
 
     def start_enclosure(self):
         canvas = self.iface.mapCanvas()
@@ -1429,17 +1489,9 @@ class OspConnectivityPlugin:
         tables = read_tables(layers, infos)
         model = editor_model(enclosure, features, tables, self._tolerance(project))
         def saved_route(group):
-            # Read the project fresh: only stored connections are traced, never pending editor rows.
-            current_layers, current_infos = scan(project)
-            current_features = read_features(project, current_layers, current_infos)
-            result = trace_fibers(group.get("a_cable_id"), group.get("a_layer_id"), group.get("a_from"),
-                                  group.get("a_to"), current_features, read_tables(current_layers, current_infos),
-                                  self._tolerance(project))
-            self._reports = list(result.get('reports') or [])
-            self._highlight(current_layers, result.get('highlights') or {})
-            text = format_report(result)
-            self._show(text)
-            return text
+            first, last = group.get("a_from"), group.get("a_to")
+            numbers = list(range(int(first), int(last if last is not None else first) + 1)) if first is not None else []
+            return self._saved_fiber_route(project, group.get("a_cable_id"), group.get("a_layer_id"), numbers)
 
         def print_saved_route(group):
             saved_route(group)
@@ -1816,7 +1868,7 @@ class OspConnectivityPlugin:
             "Trace selection": "trace", "Add fiber enclosure": "enclosure", "Add patch panel": "panel",
             "View patch panel": "view-panel", "View switch": "view-switch", "Add switch": "switch",
             "Patching": "patch", "Add device": "device", "Add cable": "cable", "Set snap tolerance": "snap",
-            "Splice Editor": "splice-editor", "Export for Google Earth": "earth",
+            "Splice Editor": "splice-editor", "Export for Google Earth": "earth", "Show Strands List": "strands",
         }
         path = Path(__file__).parent / "icons" / f"{icons[text]}.svg"
         action = QAction(QIcon(str(path)), text, self.iface.mainWindow())

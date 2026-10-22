@@ -108,6 +108,11 @@ class FiberPathTests(unittest.TestCase):
         self.assertTrue(any('loop back' in warning for warning in found['warnings']))
         self.assertLess(len(route_lines(found['routes'])), 10)
 
+    def test_an_unnamed_end_takes_its_panels_idf(self):
+        self.cables[2]['values'].pop('z_end')
+        self.places.append(point('fdp', 30, 'PP2', (120, 0), idf_ref='IDF-2'))
+        self.assertEqual(self.lines('F-1', [1, 2])[-1], 'To: IDF-2 PP2:1-2 (F-3:1-2)')
+
     def test_fiber_terminations_set_the_port(self):
         tables = {'splices': self.splices, 'terminations': [
             {'cable_id': 'F-3', 'strand_no': n, 'fdp_id': 'FDP-9', 'panel_position': str(n + 20)} for n in (1, 2)]}

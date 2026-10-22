@@ -41,6 +41,7 @@ The **OSP Connectivity** toolbar uses compact square icons. Hover over an icon t
 | Associate selection | Builds one circuit from the features you have selected, then asks for the panel and port. Handholes the cable passes through are included. |
 | Modify associations | Select one device to change its panel, port, and handholes, or select an enclosure to open Splice Editor. |
 | Splice Editor | Select a fiber enclosure to edit all its cable pairs and fiber ranges. |
+| Show Strands List | Click a fiber cable segment to list every strand and the circuit on it, such as `AP-0004 ↔︎ IDF-1 FD-01:1-2-1`. |
 | Trace selection | Follows the selected device, cable, or IDF and highlights the path. |
 | Add fiber enclosure | Click a fiber cable. The cable is split and you choose which strands are spliced. If cables are selected, only the selected cables are split or linked. |
 | Add patch panel | Click an IDF. A copper cable gets a copper panel and a fiber cable gets a fiber panel, with the port and ends recorded in the dialog. A new panel asks for its port count and is stored on that IDF. |
@@ -96,6 +97,27 @@ Select a fiber enclosure, then click **Splice Editor** (or **Modify associations
 If the splice layer needs `a_layer_id`, `b_layer_id`, `tray`, `notes`, or `loss_db` fields, they are added in the same edit command, so those changes can also be undone. Stored relation tables are reopened when available, preserving their data even when they were removed from the layer tree.
 
 Duct segments are ordered by chaining their endpoints. If they do not form one chain, reorder them in the dialog before saving. Ducts that have no segment id are stored by layer and feature id. The plugin does not invent segment ids.
+
+### Show Strands List
+
+Choose **Show Strands List** and click any fiber cable segment. A window lists every strand of that segment with the circuit it carries:
+
+```
+1   AP-0004 ↔︎ IDF-1 FD-01:1-2-1
+2   AP-0004 ↔︎ IDF-1 FD-01:1-2-2
+3   IDF-1 FD-01:3-4 ↔︎ IDF-2 FD-02:3-4-1
+4   IDF-1 FD-01:3-4 ↔︎ IDF-2 FD-02:3-4-2
+5   IDF-1 FD-01:5 ↔︎ IDF-3 FD-03:7-1
+6   no circuit
+```
+
+Each strand is followed through its saved splices to both ends, as in a fiber trace. The A end is the first termination on that route and the Z end the last; when one end is a device, the device is the A end. A panel end reads as the IDF and `panel:ports`, with the circuit's ports. `-1` and `-2` are the fibers of a 2-fiber circuit, and a 1-fiber circuit shows only `-1`. The same circuit reads the same from every segment it passes through.
+
+- A circuit record whose strand range covers the strand, on any cable of its route, sets the circuit: its device is the A end and its IDF, panel, and port the Z end.
+- Otherwise, fibers on the same duplex port pair (1-2, 3-4, …) that go to the same ends are one circuit. A simplex panel, or a fiber with no partner, makes a 1-fiber circuit.
+- A strand with an end that is open, not spliced, or not recorded has no circuit. The Route column still shows where it goes.
+
+Select a strand and click **Show saved route** to trace its whole circuit, both fibers of a pair, from panel and port to panel and port. It works as it does in the Splice Editor: the route is highlighted on the map and summarized in the window, and **Print saved route PDF** prints it as a circuit card. **Copy list** copies the table. The strand count comes from the cable, or from the highest strand any saved record uses.
 
 ### Trace selection
 

@@ -25,6 +25,12 @@ def fiber_routes(cable_id: str, layer_id: str, numbers: list[int], features: lis
     ``end`` end), the ``cables`` and ``enclosures`` in path order, and both
     terminations. ``warnings`` names saved splices that cannot be followed.
     """
+    found = fiber_paths(cable_id, layer_id, numbers, features, tables)
+    return {"routes": _group(found["paths"], features, tables), "warnings": found["warnings"]}
+
+
+def fiber_paths(cable_id: str, layer_id: str, numbers: list[int], features: list[dict], tables: dict) -> dict:
+    """One path per fiber: its ordered ``hops`` and its ``start`` and ``end`` terminations, ports resolved."""
     splices = _distinct(tables.get("splices") or [])
     index: dict[tuple[str, int], list[int]] = {}
     for position, row in enumerate(splices):
@@ -36,12 +42,21 @@ def fiber_routes(cable_id: str, layer_id: str, numbers: list[int], features: lis
     enclosures = {feature_id(feature).casefold(): feature for feature in features
                   if feature.get("role") == "splice_enc" and feature_id(feature)}
     start = _cable(cables, cable_id, layer_id)
+    # A cable end that names no place still has one when its panel belongs to an IDF.
+    panel_rooms = {feature_id(feature).casefold(): text_of((feature.get("values") or {}).get("idf_ref")) or ""
+                   for feature in features if feature.get("role") in ("patch_panel", "fdp") and feature_id(feature)}
     warnings: list[str] = []
     paths = []
     for number in numbers:
         path = _walk(start, cable_id, number, splices, index, cables, enclosures, warnings)
+        for side in ("start", "end"):
+            term = path[side]
+            if term.get("kind") == "end":
+                term["panel"], term["port"] = _ports(term, features, tables)
+                if not term.get("place") and term["panel"]:
+                    term["place"] = panel_rooms.get(term["panel"].casefold(), "")
         paths.append(path)
-    return {"routes": _group(paths, features, tables), "warnings": list(dict.fromkeys(warnings))}
+    return {"paths": paths, "warnings": list(dict.fromkeys(warnings))}
 
 
 def _distinct(rows):
@@ -195,10 +210,6 @@ def _group(paths, features, tables):
     """Fibers that take the same path, compressed into ranges."""
     groups: dict[tuple, list[dict]] = {}
     for path in paths:
-        for side in ("start", "end"):
-            term = path[side]
-            if term.get("kind") == "end":
-                term["panel"], term["port"] = _ports(term, features, tables)
         key = (tuple((hop["a_cable_id"].casefold(), (hop["b_cable_id"] or "").casefold(), hop["splice_enc_id"].casefold(),
                       hop["splice_type"]) for hop in path["hops"]),
                _term_key(path["start"]), _term_key(path["end"]))
