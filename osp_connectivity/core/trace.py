@@ -438,46 +438,34 @@ def _cables_for_device(device: dict, features: list[dict], index: dict) -> list[
 
 
 def _walk_strands(cable_id: str, numbers: list[int], splices: list[dict]) -> list[dict]:
-    """Follow each strand until it stops. Express and fusion both continue."""
-    index: dict[tuple, list[dict]] = {}
-    for splice in splices:
-        for side, other in (("a", "b"), ("b", "a")):
-            side_cable = text_of(splice.get(f"{side}_cable_id"))
-            side_strand = splice.get(f"{side}_strand_no")
-            if not side_cable or side_strand in (None, ""):
-                continue
-            index.setdefault((side_cable.casefold(), int(side_strand)), []).append((other, splice))
+    """Walk each physical connection once, including both directions from a middle segment."""
+    from collections import deque
 
-    rows = []
+    index = {}
+    for edge, splice in enumerate(splices):
+        for side, other in (("a", "b"), ("b", "a")):
+            identifier = text_of(splice.get(f"{side}_cable_id"))
+            number = splice.get(f"{side}_strand_no")
+            if identifier and number not in (None, ""):
+                index.setdefault((identifier.casefold(), int(number)), []).append((edge, other, splice))
+    rows, seen_edges = [], set()
     for start in numbers:
-        current_cable = cable_id
-        current_strand = start
-        seen = set()
-        while current_cable and current_strand:
-            key = (current_cable.casefold(), int(current_strand))
-            if key in seen:
-                break
-            seen.add(key)
-            options = index.get(key) or []
-            if not options:
-                break
-            other_side, splice = options[0]
-            next_cable = text_of(splice.get(f"{other_side}_cable_id"))
-            next_strand = splice.get(f"{other_side}_strand_no")
-            rows.append(
-                {
-                    "a_cable_id": current_cable,
-                    "a_strand_no": int(current_strand),
-                    "b_cable_id": next_cable,
-                    "b_strand_no": int(next_strand) if next_strand not in (None, "") else None,
-                    "splice_type": splice.get("splice_type") or "splice",
-                    "splice_enc_id": splice.get("splice_enc_id"),
-                }
-            )
-            if (splice.get("splice_type") or "").upper() == "OPEN" or not next_cable:
-                break
-            current_cable = next_cable
-            current_strand = int(next_strand)
+        pending = deque([(cable_id, int(start))])
+        while pending:
+            current, number = pending.popleft()
+            for edge, other, splice in index.get((current.casefold(), number), []):
+                if edge in seen_edges:
+                    continue
+                seen_edges.add(edge)
+                next_cable = text_of(splice.get(f"{other}_cable_id"))
+                next_number = splice.get(f"{other}_strand_no")
+                next_number = int(next_number) if next_number not in (None, "") else None
+                rows.append({"a_cable_id": current, "a_strand_no": number,
+                             "b_cable_id": next_cable, "b_strand_no": next_number,
+                             "splice_type": splice.get("splice_type") or "splice",
+                             "splice_enc_id": splice.get("splice_enc_id")})
+                if (splice.get("splice_type") or "").upper() != "OPEN" and next_cable and next_number:
+                    pending.append((next_cable, next_number))
     return rows
 
 

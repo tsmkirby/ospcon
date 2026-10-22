@@ -2,3 +2,6 @@
 NCL_QGIS/
 NCL_QGIS_V3/
 QGIS_OSP_Network_Template/
+
+__pycache__/
+*.py[cod]

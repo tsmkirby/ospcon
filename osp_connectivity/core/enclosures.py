@@ -94,7 +94,7 @@ def enclosure_association(enclosure: dict, features: list[dict], tables: dict, t
     }
 
 
-def enclosure_edits(association: dict, choices: dict | None, tables: dict) -> dict:
+def enclosure_edits(association: dict, choices: dict | None, tables: dict, tolerance: float | None = None) -> dict:
     """Membership and end writes for every cable here, plus a replacement splice map when one was edited."""
     enclosure = association["enclosure"]
     enc_id = feature_id(enclosure) or ""
@@ -121,7 +121,10 @@ def enclosure_edits(association: dict, choices: dict | None, tables: dict) -> di
         values = cable.get("values") or {}
         if _same(values.get("a_end"), enc_id) or _same(values.get("z_end"), enc_id):
             continue
-        end = nearer_end_name(cable.get("coords") or [], point)
+        coords = cable.get("coords") or []
+        if tolerance is not None and (not point or len(coords) < 2 or not _end_at(coords, point, tolerance)):
+            continue
+        end = nearer_end_name(coords, point)
         if text_of(values.get(end)):
             continue
         edits.append(

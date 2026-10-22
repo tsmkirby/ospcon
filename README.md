@@ -33,13 +33,14 @@ Copy the folder rather than making a shortcut. QGIS reads the plugin from that d
 
 ## Toolbar
 
-The **OSP Connectivity** toolbar has these actions. Results open in the **OSP Report** dock, which can copy the text, export a spreadsheet, print a circuit card, or clear the map highlight.
+The **OSP Connectivity** toolbar uses compact square icons. Hover over an icon to see its name; the same actions are available under **Plugins → OSP Connectivity**. The toolbar has these actions. Results open in the **OSP Report** dock, which can copy the text, export a spreadsheet, print a circuit card, or clear the map highlight.
 
 | Action | What it does |
 | --- | --- |
 | Build associations | Reads the open project and fills links that the attributes already imply. |
 | Associate selection | Builds one circuit from the features you have selected, then asks for the panel and port. Handholes the cable passes through are included. |
-| Modify associations | Select one device. Change its panel, port, and handholes, then save. |
+| Modify associations | Select one device to change its panel, port, and handholes, or select an enclosure to open Splice Editor. |
+| Splice Editor | Select a fiber enclosure to edit all its cable pairs and fiber ranges. |
 | Trace selection | Follows the selected device, cable, or IDF and highlights the path. |
 | Add fiber enclosure | Click a fiber cable. The cable is split and you choose which strands are spliced. |
 | Add patch panel | Click an IDF. A copper cable gets a copper panel and a fiber cable gets a fiber panel, with the port and ends recorded in the dialog. A new panel asks for its port count and is stored on that IDF. |
@@ -73,7 +74,23 @@ Handholes the selected cables pass through are listed and checked. Each one is s
 
 Select one AP, camera, jack, or POS, then run **Modify associations**. The dialog lists that device’s cable, IDF, panel, port, and handholes. Change the panel or the port, check or uncheck handholes, and save. A panel name that is not already a feature is created on the IDF. This is an explicit edit, so the panel and port you enter replace the ones stored for that device.
 
-Select one fiber enclosure instead, and the same tool opens the enclosure splice dialog. Cables that already end there stay expressed on the same strand numbers. A fiber cable drawn to the enclosure, and not yet associated, is listed as a new cable. Add a fusion row to splice it, then save. The cable is linked to the enclosure and its nearer blank end is labeled with the enclosure id.
+Select one fiber enclosure instead, and the same tool opens **Splice Editor**.
+
+### Splice Editor
+
+Select a fiber enclosure, then click **Splice Editor** (or **Modify associations**). The table loads **all** splice connections in the enclosure, including express fibers and connections between different cable pairs. Contiguous fibers appear as ranges, such as cable A `47-48` → cable C `1-2`.
+
+- Add a row, change either cable or fiber range, or select rows and delete them. Both fiber ranges must have the same length. A deleted connection leaves its fibers available.
+- Choose **FUSION**, **EXPRESS**, **MECHANICAL**, or **OPEN**. Express fibers retain the same numbers on both cables. OPEN records an explicitly open range; delete that row before assigning those fibers to another connection.
+- The cable inventory shows total fibers, reserved fibers, and available ranges. It includes cables stored in the enclosure relations and new fiber cables whose endpoints reach the enclosure within the snap tolerance. Enter a fiber count for a cable when it is unknown.
+- **Express spare fibers** connects matching unused numbers between two chosen cables. Existing connections are preserved.
+- Record a tray, measured loss in dB, status, and notes. Existing native attributes such as splice dates and technician names survive range edits.
+- Filter rows by cable, tray, type, or notes; copy the table; undo and redo edits within the dialog. Filtering only hides rows and does not remove their connections.
+- Validation checks fiber counts on both cables, overlapping assignments in either direction, mismatched ranges, ambiguous cable IDs, and invalid measurements. Fix the errors before saving.
+
+**Save** applies the table, adds newly detected enclosure memberships, and labels blank cable endpoints. Only changed splice rows are replaced; other enclosures and unchanged splice records keep their IDs and attributes. **Cancel** leaves the splice table unchanged. Changes stay in the QGIS edit buffers until you save layer edits. Each affected layer has its own undo step.
+
+If the splice layer needs `a_layer_id`, `b_layer_id`, `tray`, `notes`, or `loss_db` fields, they are added in the same edit command, so those changes can also be undone. Stored relation tables are reopened when available, preserving their data even when they were removed from the layer tree.
 
 Duct segments are ordered by chaining their endpoints. If they do not form one chain, reorder them in the dialog before saving. Ducts that have no segment id are stored by layer and feature id. The plugin does not invent segment ids.
 
@@ -204,3 +221,5 @@ Known field names are read as aliases. `a_end_location` and `a_end_id` are both 
 ## What this version does not do
 
 Dark-fiber inventory, a separate duct-fill report, a standing validation dock, and copper pair counts are not in this version. A fiber layer that has no A and Z ends is reported, and the plugin does not force it into a full circuit.
+
+The `test_qgis_editor` checks additionally exercise the real dialogs, square toolbar icons, edit rollback, and relation-table recovery when run with QGIS's bundled Python and `QT_QPA_PLATFORM=offscreen`. They skip automatically with a standard Python installation.

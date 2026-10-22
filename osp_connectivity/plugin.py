@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import traceback
+from pathlib import Path
 
-from qgis.PyQt.QtCore import Qt, QUrl
-from qgis.PyQt.QtGui import QColor, QDesktopServices
+from qgis.PyQt.QtCore import Qt, QUrl, QSize
+from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon
 from qgis.PyQt.QtWidgets import (
     QAction,
     QApplication,
@@ -50,6 +51,7 @@ from .bridge import (
     ensure_id_field,
     ensure_panel_layer,
     ensure_project,
+    ensure_splice_fields,
     existing_keys,
     read_features,
     read_tables,
@@ -60,6 +62,7 @@ from .core.associate import assignment_edits, device_association, modification_e
 from .core.cards import write_circuit_cards
 from .core.catalog import feature_id
 from .core.enclosures import enclosure_association, enclosure_edits, enclosure_end_links
+from .core.splice_editor import editor_model, splice_changes
 from .core.export import export_reports
 from .core.fields import enclosure_id_from_prefix, mapped_values, media_of, next_id, parse_count, parse_range, suggest_enclosure_prefix, text_of
 from .core.geometry import distance, split_linestring
@@ -101,6 +104,7 @@ from .dialogs import (
     SwitchDialog,
 )
 from .mapimage import render_circuit_jpegs
+from .splice_dialog import SpliceEditorDialog
 
 
 class SketchTool(QgsMapToolCapture):
@@ -223,9 +227,12 @@ class OspConnectivityPlugin:
     def initGui(self):
         self.toolbar = self.iface.addToolBar("OSP Connectivity")
         self.toolbar.setObjectName("OspConnectivity")
+        self.toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.toolbar.setIconSize(QSize(24, 24))
         self._action("Build associations", self.build_associations)
         self._action("Associate selection", self.associate_selection)
         self._action("Modify associations", self.modify_associations)
+        self._action("Splice Editor", self.open_splice_editor)
         self._action("Trace selection", self.trace_selection)
         self._action("Add fiber enclosure", self.start_enclosure)
         self._action("Add patch panel", self.start_panel)
@@ -269,7 +276,10 @@ class OspConnectivityPlugin:
             canvas.unsetMapTool(self.tool)
             self.tool = None
         for action in self.actions:
+            self.iface.removePluginMenu("OSP Connectivity", action)
             self.toolbar.removeAction(action)
+            action.deleteLater()
+        self.actions.clear()
         if self.toolbar is not None:
             del self.toolbar
             self.toolbar = None
@@ -380,9 +390,13 @@ class OspConnectivityPlugin:
             write_mount_rows="mounted_device" in store,
         )
         session = EditSession()
-        skipped = apply_edits(session, layers, infos, plan.edits)
-        written = apply_inserts(session, store, plan.inserts)
-        errors = session.commit()
+        try:
+            skipped = apply_edits(session, layers, infos, plan.edits)
+            written = apply_inserts(session, store, plan.inserts)
+            errors = session.commit()
+        except Exception:
+            session.rollback()
+            raise
         lines = [f"{notice.level.title()}: {notice.message}" for notice in plan.notices]
         lines.append(f"Field updates: {len(plan.edits) - len(skipped)}")
         lines.append(f"Rows added: {written}")
@@ -705,9 +719,10 @@ class OspConnectivityPlugin:
 
     def _ask_splice(self, feature, new_id, laterals, prefix, prefix_enabled):
         count = parse_count((feature.get("values") or {}).get("strand_count")) or 0
-        targets = [{"id": new_id, "layer_id": feature["layer_id"]}]
+        targets = [{"id": new_id, "layer_id": feature["layer_id"], "split_segment": True}]
         for lateral, _result in laterals:
-            targets.append({"id": feature_id(lateral), "layer_id": lateral["layer_id"]})
+            targets.append({"id": feature_id(lateral), "layer_id": lateral["layer_id"],
+                            "capacity": parse_count((lateral.get("values") or {}).get("strand_count")) or 0})
         dialog = SpliceDialog(
             count or 12,
             feature_id(feature) or "",
@@ -1333,57 +1348,75 @@ class OspConnectivityPlugin:
         self._show("\n".join(lines))
         self.iface.mapCanvas().refresh()
 
+    def open_splice_editor(self):
+        self._run("Splice Editor", self._edit_selected_enclosure)
+
+    def _edit_selected_enclosure(self):
+        project = QgsProject.instance()
+        layers, infos = scan(project)
+        features = read_features(project, layers, infos)
+        selected = [feature for feature in self._selected(layers, features) if feature.get("role") == "splice_enc"]
+        if len(selected) != 1:
+            raise RuntimeError("Select one fiber enclosure, then open Splice Editor.")
+        layers, infos, store = ensure_project(project, layers, infos)
+        self._modify_enclosure(project, layers, infos, store, features, selected[0])
+
     def _modify_enclosure(self, project, layers, infos, store, features, enclosure) -> None:
         tables = read_tables(layers, infos)
-        association = enclosure_association(enclosure, features, tables, self._tolerance(project))
-        if not association["from_cable"]:
-            raise RuntimeError("No fiber cable ends at this enclosure.")
-        enc_id = feature_id(enclosure) or "enclosure"
-        choices = None
-        if association["targets"]:
-            new_ids = [feature_id(item) for item in association["unadded"] if feature_id(item)]
-            note = f"Enclosure {enc_id}."
-            if new_ids:
-                note += " New cable at this enclosure: " + ", ".join(new_ids) + ". Add a fusion row to splice it."
-            dialog = SpliceDialog(
-                association["strand_count"],
-                feature_id(association["from_cable"]) or "",
-                association["targets"],
-                self.iface.mainWindow(),
-                prefix=enc_id,
-                prefix_enabled=False,
-                title="Modify fiber enclosure",
-                prefix_label="Enclosure",
-                note=note,
-                initial_fusions=association["fusions"],
-                initial_opens=association["opens"],
-            )
-            if dialog.exec_() != dialog.Accepted:
-                return
-            choices = dialog.result_edits()
-        result = enclosure_edits(association, choices, tables)
+        model = editor_model(enclosure, features, tables, self._tolerance(project))
+        dialog = SpliceEditorDialog(model, self.iface.mainWindow())
+        if dialog.exec_() != dialog.Accepted:
+            return
+        edited_model = dialog.model
+        latest = read_tables(layers, infos)
+        current_rows = [row for row in latest.get("splices", [])
+                        if str(row.get("splice_enc_id") or "").casefold() == (feature_id(enclosure) or "").casefold()]
+        if current_rows != model["original"]:
+            raise RuntimeError("The enclosure splices changed while this editor was open. Reopen the editor to use the latest connections.")
+        tables = latest
+        result = splice_changes(edited_model, dialog.choices())
+        real_cables = [cable for cable in edited_model["cables"] if not cable.get("missing")]
+        membership = enclosure_edits({"enclosure": enclosure, "cables": real_cables}, None, tables, self._tolerance(project))
+        if "fiber_splice" not in store or "splice_enc_cable" not in store:
+            raise RuntimeError("This project needs splice and enclosure membership tables before saving.")
         session = EditSession()
         try:
-            delete_features(session, layers, result.get("delete") or [])
-            skipped = apply_plain_edits(session, layers, infos, result.get("edits") or [])
-            inserts = [RowInsert("splice_enc_cable", row, "membership") for row in result.get("memberships") or []]
-            inserts.extend(RowInsert("fiber_splice", row, "splice") for row in result.get("splices") or [])
-            inserts.extend(RowInsert("fiber_strand", row, "strand") for row in result.get("strands") or [])
+            # All validation completes before replacing any of the original splice rows.
+            session.edit(store["fiber_splice"])
+            ensure_splice_fields(store["fiber_splice"])
+            delete_features(session, layers, result["delete"])
+            skipped = apply_plain_edits(session, layers, infos, membership["edits"])
+            edits = []
+            for before, cable in zip(model["cables"], edited_model["cables"]):
+                if cable.get("capacity") != before.get("capacity") and not cable.get("missing"):
+                    edits.append({"layer_id": cable["layer_id"], "fid": cable["fid"],
+                                  "canonical": "strand_count", "value": cable["capacity"]})
+            skipped.extend(apply_plain_edits(session, layers, infos, edits))
+            inserts = [RowInsert("fiber_splice", row, "splice") for row in result["splices"]]
+            inserts.extend(RowInsert("splice_enc_cable", row, "membership") for row in membership["memberships"])
+            # Use each cable's own capacity, not the source cable's fiber count.
+            known = {(str(row.get("cable_id") or "").casefold(), int(row.get("strand_no") or 0),
+                      row.get("source_layer_id") or "") for row in tables.get("strands", [])}
+            for cable in real_cables:
+                for number in range(1, int(cable.get("capacity") or 0) + 1):
+                    cable_id = feature_id(cable)
+                    key = (cable_id.casefold(), number, cable.get("layer_id") or "")
+                    if key in known or (key[0], number, "") in known:
+                        continue
+                    known.add(key)
+                    inserts.append(RowInsert("fiber_strand", {"strand_id": f"{cable_id}.{number}",
+                        "source_layer_id": cable.get("layer_id") or "", "cable_id": cable_id,
+                        "strand_no": number, "status": "spare"}, "strand"))
             apply_inserts(session, store, inserts)
-            errors = session.commit()
+            session.commit()
         except Exception:
             session.rollback()
             raise
-        if errors:
-            raise RuntimeError("\n".join(errors))
-        lines = [f"{enc_id} associations were updated."]
-        added = [feature_id(item) for item in association["unadded"] if feature_id(item)]
-        if added:
-            lines.append("Added cables: " + ", ".join(added))
-        for note in skipped:
-            lines.append(f"Skipped field: {note}")
-        lines.append("Save layer edits to keep this. Undo reverses it until then.")
+        lines = [f"{feature_id(enclosure)} splice table updated: {len(result['splices'])} added, {len(result['delete'])} removed."]
+        lines.extend(f"Skipped field: {note}" for note in skipped)
+        lines.append("Save layer edits to keep this. Each affected layer has an OSP Connectivity undo step.")
         self._show("\n".join(lines))
+        self._reports = []
         self.iface.mapCanvas().refresh()
 
     def _handhole_inserts(self, inserts, rows, tables) -> None:
@@ -1593,9 +1626,24 @@ class OspConnectivityPlugin:
             QMessageBox.critical(self.iface.mainWindow(), title, str(exc))
 
     def _action(self, text, slot) -> None:
-        action = QAction(text, self.iface.mainWindow())
+        icons = {
+            "Build associations": "build", "Associate selection": "associate", "Modify associations": "modify",
+            "Trace selection": "trace", "Add fiber enclosure": "enclosure", "Add patch panel": "panel",
+            "View patch panel": "view-panel", "View switch": "view-switch", "Add switch": "switch",
+            "Patching": "patch", "Add device": "device", "Add cable": "cable", "Set snap tolerance": "snap",
+            "Splice Editor": "splice-editor",
+        }
+        path = Path(__file__).parent / "icons" / f"{icons[text]}.svg"
+        action = QAction(QIcon(str(path)), text, self.iface.mainWindow())
+        action.setToolTip(text)
+        action.setStatusTip(text)
         action.triggered.connect(slot)
         self.toolbar.addAction(action)
+        button = self.toolbar.widgetForAction(action)
+        if button is not None:
+            button.setFixedSize(32, 32)
+            button.setAccessibleName(text)
+        self.iface.addPluginToMenu("OSP Connectivity", action)
         self.actions.append(action)
 
 

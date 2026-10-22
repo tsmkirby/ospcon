@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 
 from qgis.PyQt.QtCore import QVariant
 from qgis.core import (
@@ -214,11 +215,10 @@ class EditSession:
         if layer not in self.layers:
             if not layer.isEditable() and not layer.startEditing():
                 raise RuntimeError(f"{layer.name()} is not editable.")
-            # A command that is already open belongs to the user. Nesting a second
-            # one leaves the outer command open, and QGIS then disables Undo.
-            if not layer.isEditCommandActive():
-                layer.beginEditCommand("OSP Connectivity")
-                self._commands.append(layer)
+            if layer.isEditCommandActive():
+                raise RuntimeError(f"Finish the active edit command on {layer.name()} before running this tool.")
+            layer.beginEditCommand("OSP Connectivity")
+            self._commands.append(layer)
             self.layers.append(layer)
         return layer
 
@@ -256,7 +256,6 @@ def ensure_project(project: QgsProject, layers: dict, infos: list):
         return layers, infos, store
 
     if native_graph:
-        missing = [role for role in missing if role == "circuit"]
         target = _cable_gpkg(layers, infos) or _sidecar_path(project)
     else:
         target = _sidecar_path(project)
@@ -297,7 +296,8 @@ def apply_edits(session: EditSession, layers: dict, infos: list, edits: list) ->
             skipped.append(edit.note)
             continue
         session.edit(layer)
-        layer.changeAttributeValue(edit.fid, index, edit.value)
+        if not layer.changeAttributeValue(edit.fid, index, edit.value):
+            raise RuntimeError(f"Could not update {actual} on {layer.name()}.")
     return skipped
 
 
@@ -309,10 +309,13 @@ def delete_features(session: EditSession, layers: dict, pairs: list) -> None:
         grouped.setdefault(layer_id, []).append(fid)
     for layer_id, fids in grouped.items():
         layer = layers.get(layer_id)
-        if layer is None or not fids:
+        if not fids:
             continue
+        if layer is None:
+            raise RuntimeError("A layer needed to remove the old associations is no longer available.")
         session.edit(layer)
-        layer.deleteFeatures(fids)
+        if not layer.deleteFeatures(fids):
+            raise RuntimeError(f"Could not remove the old associations on {layer.name()}.")
 
 
 def update_feature_fields(session: EditSession, layers: dict, updates: list) -> None:
@@ -332,6 +335,8 @@ def apply_inserts(session: EditSession, store: dict, inserts: list) -> int:
     for insert in inserts:
         layer = store.get(insert.role)
         if layer is None:
+            if insert.role in ("fiber_splice", "fiber_strand", "splice_enc_cable"):
+                raise RuntimeError(f"Missing table for {insert.role}.")
             continue
         if insert.role == "cable_route" and not insert.values.get("segment_id"):
             if layer.fields().indexFromName("segment_fid") < 0:
@@ -342,8 +347,9 @@ def apply_inserts(session: EditSession, store: dict, inserts: list) -> int:
             index = layer.fields().indexFromName(key)
             if index >= 0 and value is not None:
                 feature.setAttribute(index, value)
-        if layer.addFeature(feature):
-            written += 1
+        if not layer.addFeature(feature):
+            raise RuntimeError(f"Could not add {insert.role} on {layer.name()}. Changes were rolled back.")
+        written += 1
     return written
 
 
@@ -769,6 +775,17 @@ def _layer_specs(project: QgsProject):
 
 
 def _write_layer(project, path, layer_name, title, wkb, fields) -> None:
+    # A table removed from the layer tree may still contain the entire network.
+    # Reopen it instead of CreateOrOverwriteLayer destroying its rows.
+    if os.path.exists(path):
+        with sqlite3.connect(path) as connection:
+            exists = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (layer_name,)).fetchone()
+        if exists:
+            loaded = QgsVectorLayer(f"{path}|layername={layer_name}", title, "ogr")
+            if not loaded.isValid():
+                raise RuntimeError(f"Existing {title} could not be opened. Its data was preserved.")
+            project.addMapLayer(loaded)
+            return
     uri = "None" if wkb == "None" else f"{wkb}?crs={project.crs().authid()}"
     memory = QgsVectorLayer(uri, layer_name, "memory")
     if not memory.isValid():
@@ -895,6 +912,14 @@ def _add_relation(project, relation_id, name, referencing, referenced, referenci
     relation.addFieldPair(referencing_field, referenced_field)
     if relation.isValid() and not project.relationManager().relation(relation.id()).isValid():
         project.relationManager().addRelation(relation)
+
+
+def ensure_splice_fields(layer) -> None:
+    _add_missing_fields(layer, [
+        QgsField("a_layer_id", QVariant.String), QgsField("b_layer_id", QVariant.String),
+        QgsField("tray", QVariant.String), QgsField("notes", QVariant.String),
+        QgsField("loss_db", QVariant.Double),
+    ])
 
 
 def _set_named(feature, names: list, value) -> None:

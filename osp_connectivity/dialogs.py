@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime, QVariant
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
@@ -33,6 +35,7 @@ from .core.export import COLUMNS, item_label
 from .core.fields import parse_count, parse_range
 from .core.place import name_taken
 from .core.strands import build_splice_rows, compress_splices, validate_edits
+from .core.splice_editor import group_rows, strict_range, validate_groups
 from .core.switches import (
     new_patch,
     open_panel_ports,
@@ -342,7 +345,32 @@ class SpliceDialog(QDialog):
         if not self.prefix.text().strip():
             QMessageBox.warning(self, "Fiber enclosure", "Enter an enclosure prefix, such as VIB or OSP.")
             return
+        # A malformed row must never disappear silently from a saved splice map.
+        for row in range(self.table.rowCount()):
+            for column in (0, 1, 3):
+                item = self.table.item(row, column)
+                if item is None or not item.text().strip().isdigit() or int(item.text().strip()) < 1:
+                    QMessageBox.warning(self, "Fiber enclosure", f"Fusion row {row + 1}: enter positive fiber numbers.")
+                    return
+            if not self.table.cellWidget(row, 2).currentData():
+                QMessageBox.warning(self, "Fiber enclosure", f"Fusion row {row + 1}: choose a target cable.")
+                return
+        try:
+            for interval in re.split(r"[,;]+", self.opens.text()):
+                if interval.strip():
+                    strict_range(interval)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Fiber enclosure", str(exc))
+            return
         problems = validate_edits(self.count.value(), self._fusions(), self._open_ranges())
+        if not problems and self.targets:
+            rows = build_splice_rows(self.count.value(), self.from_cable, self.targets[0]["id"], "enclosure",
+                                     self._fusions(), self._open_ranges())
+            cables = [{"id": self.from_cable, "capacity": self.count.value()}]
+            for target in self.targets:
+                capacity = self.count.value() if target.get("split_segment") else target.get("capacity", 0)
+                cables.append({"id": target["id"], "layer_id": target.get("layer_id") or "", "capacity": capacity})
+            problems.extend(validate_groups(group_rows(rows), cables))
         if problems:
             QMessageBox.warning(self, "Fiber enclosure", "\n".join(problems))
             return

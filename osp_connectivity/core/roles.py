@@ -47,6 +47,10 @@ def classify(geometry_type: str, field_names: Iterable[str]) -> Optional[str]:
             return "splice_enc_cable"
         if "circuit_id" in names:
             return "circuit"
+        if "pp_id" in names and "panel_port" not in names:
+            return "patch_panel"
+        if "fdp_id" in names and "strand_no" not in names:
+            return "fdp"
         return None
 
     if geometry == "Line":
